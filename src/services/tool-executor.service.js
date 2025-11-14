@@ -2,26 +2,8 @@
  * Tool Executor Service
  * Executes MCP tools called by the orchestrator
  */
-
-const promptService = require('./prompt.service');
 const imageGenerationService = require('./image-generation.service');
 const replicateModelsService = require('./replicate-models.service');
-
-/**
- * Execute suggest-prompt tool
- */
-async function executeSuggestPrompt({ userInput }) {
-  try {
-    const result = await promptService.suggest(userInput);
-
-    return {
-      success: true,
-      suggestion: result.suggestion
-    };
-  } catch (error) {
-    throw new Error(error.message || 'Failed to generate prompt suggestion');
-  }
-}
 
 /**
  * Execute list-models tool
@@ -265,7 +247,6 @@ async function executeTool(toolName, args = {}) {
 
 module.exports = {
   executeTool,
-  executeSuggestPrompt,
   executeListModels,
   executeSearchModels,
   executeGetModel,
