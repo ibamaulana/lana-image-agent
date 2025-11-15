@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  lana-agent:
+    build: ./
+    command: >
+      sh -c "node server.js"
+    ports:
+      - "14009:8000"
+    volumes:
+      - ./:/usr/src/app
+      - /usr/src/app/node_modules
+    env_file:
+      - .env

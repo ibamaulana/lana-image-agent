@@ -115,6 +115,7 @@ async function executeGetModel({ modelId }) {
 async function executeGenerateImage({
   modelId,
   prompt,
+  title,
   referenceImages,
   aspectRatio,
   style,
@@ -194,6 +195,7 @@ async function executeGenerateImage({
       success: true,
       imageUrl,
       metadata: {
+        title: title || 'Untitled',
         model: {
           id: model.id,
           name: model.name,

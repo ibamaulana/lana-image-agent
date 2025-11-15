@@ -59,6 +59,10 @@ function getToolDefinitions() {
                 type: 'string',
                 description: 'Required: Refined prompt with quality tags and details'
               },
+              title: {
+                type: 'string',
+                description: 'Required: A creative, descriptive title for the image (3-8 words)'
+              },
               referenceImages: {
                 type: 'array',
                 items: {
@@ -83,7 +87,7 @@ function getToolDefinitions() {
                 description: 'Optional: Additional model-specific parameters'
               }
             },
-            required: ['modelId', 'prompt']
+            required: ['modelId', 'prompt', 'title']
           }
         }
       ]
@@ -142,11 +146,30 @@ Your workflow for generating images:
      * Respect parameter defaults and required fields
 
 4. **Refine the prompt**
-   - Enhance the user's prompt with quality tags appropriate for the selected model
+   
+   **CRITICAL: Different approach for reference images vs. text-only:**
+   
+   **When reference images are provided:**
+   - The reference image DEFINES the subject - DO NOT change or describe the subject
+   - Keep the prompt MINIMAL and GENERAL
+   - Only add style/quality tags that complement the transformation
+   - Examples:
+     * User: "change this to anime style" → Prompt: "anime style, vibrant colors, clean lines"
+     * User: "make it photorealistic" → Prompt: "photorealistic, highly detailed, sharp focus"
+     * User: "add dramatic lighting" → Prompt: "dramatic lighting, cinematic, high contrast"
+   - DO NOT add subject descriptions (like "girl", "horse", "building") - the reference already has the subject
+   - The reference image is the source of truth for WHAT to generate
+   - The prompt should only describe HOW to transform/stylize it
+   
+   **When NO reference images (text-to-image only):**
+   - Enhance the user's prompt with quality tags and descriptive details
+   - Add subject details and scene composition
    - Examples:
      * Photorealistic: add "highly detailed, sharp focus, professional photography"
-     * Anime: add "anime style, vibrant colors, clean lines"
+     * Anime: add "anime style, vibrant colors, clean lines, detailed character"
      * Artistic: add "digital art, concept art, highly detailed"
+   
+   **For all generations:**
    - Infer aspectRatio from user intent:
      * Portrait/person/selfie → "9:16"
      * Landscape/wide/panorama → "16:9"
@@ -164,6 +187,9 @@ Your workflow for generating images:
 5. **Generate the image** (call generate_image)
    - Use your selected modelId
    - Use your refined prompt
+   - Create a creative, descriptive title (3-8 words):
+     * With reference images: Focus on the transformation/style (e.g., "Anime Style Transformation", "Photorealistic Rendering")
+     * Without reference images: Describe the scene/subject (e.g., "Majestic Horse at Sunrise")
    - Pass referenceImages array if provided by user
    - Include aspectRatio and negativePrompt
    - Call the tool and wait for result
@@ -176,6 +202,8 @@ Your workflow for generating images:
 
 Guidelines:
 - Be creative but respect user intent
+- **With reference images: Keep prompts minimal and general** - don't describe the subject, only the style/transformation
+- **Without reference images: Be descriptive** - add details and quality tags to create the full scene
 - Explain your reasoning briefly (which model and why)
 - If generation fails, explain the issue and suggest a solution
 - For follow-up requests, adjust parameters accordingly
@@ -312,7 +340,7 @@ async function streamGeminiOrchestrator({
             .join('\n');
           followUpMessage = `Available models (${toolResult.total} total):\n${topModels}\n\nNow analyze the user's request and the model list. Select the BEST model based on:\n- User's intent (style, quality needs)\n- Reference image count if any (examine inputSchema for image input parameters, excluding masks)\n- Model strengths and popularity\n\nEach model has an inputSchema showing its parameters. Use this to understand:\n- Which models accept reference images (look for isImageInput: true, but ignore isMask: true)\n- Mask parameters are for inpainting only, not standard reference-based generation\n- What aspect ratios are supported\n- What other parameters are available\n\nThen refine the prompt and call generate_image with your selected model.`;
         } else if (toolName === 'generate-image') {
-          followUpMessage = `Image generated successfully at ${toolResult.imageUrl}.\n\nModel: ${toolResult.metadata.model.name}\nPrompt: ${toolResult.metadata.prompt}\nSize: ${toolResult.metadata.size}\n${toolResult.metadata.referenceImages.length > 0 ? `References: ${toolResult.metadata.referenceImages.length} image(s)\n` : ''}\nShare this with the user in a friendly way, explaining your model choice briefly.`;
+          followUpMessage = `Image generated successfully at ${toolResult.imageUrl}.\n\nTitle: ${toolResult.metadata.title}\nModel: ${toolResult.metadata.model.name}\nPrompt: ${toolResult.metadata.prompt}\nSize: ${toolResult.metadata.size}\n${toolResult.metadata.referenceImages.length > 0 ? `References: ${toolResult.metadata.referenceImages.length} image(s)\n` : ''}\nShare this with the user in a friendly way, explaining your model choice briefly.`;
         }
 
         if (followUpMessage) {
@@ -410,9 +438,15 @@ async function generateWithGeminiOrchestrator({
   state = {}
 }) {
   try {
+    const startTime = Date.now();
+    console.log('[DEBUG] ========== Starting generateWithGeminiOrchestrator ==========');
+    console.log('[DEBUG] Start time:', new Date().toISOString());
+    
     const ai = getGeminiClient();
     const tools = getToolDefinitions();
     const systemPrompt = buildSystemInstruction(state);
+    
+    console.log('[DEBUG] Client initialized. Elapsed:', Date.now() - startTime, 'ms');
 
     // Normalize referenceImages to array
     let normalizedReferences = [];
@@ -451,13 +485,18 @@ async function generateWithGeminiOrchestrator({
     console.log('[Orchestrator] Starting non-streaming generation for user:', userId);
     console.log('[Orchestrator] Prompt:', prompt.substring(0, 80));
     console.log('[Orchestrator] Reference Images:', normalizedReferences.length);
+    console.log('[DEBUG] Request prepared. Elapsed:', Date.now() - startTime, 'ms');
 
     // Initial LLM call
+    console.log('[DEBUG] Calling Gemini API (initial)...');
+    const llmStartTime = Date.now();
     let response = await ai.models.generateContent({
       model: config.gemini.model,
       contents,
       config: configOptions
     });
+    console.log('[DEBUG] Initial Gemini API response received. Duration:', Date.now() - llmStartTime, 'ms');
+    console.log('[DEBUG] Total elapsed:', Date.now() - startTime, 'ms');
 
     const toolResults = [];
     const conversationHistory = [...contents];
@@ -465,9 +504,14 @@ async function generateWithGeminiOrchestrator({
     const maxIterations = 10;
 
     // Loop through tool calls
+    console.log('[DEBUG] Starting tool execution loop...');
     while (iterationCount < maxIterations) {
+      const loopStartTime = Date.now();
+      console.log('[DEBUG] --- Iteration', iterationCount + 1, '---');
+      
       const candidates = response.candidates || [];
       if (candidates.length === 0) {
+        console.log('[DEBUG] No candidates found, exiting loop');
         break;
       }
 
@@ -479,8 +523,11 @@ async function generateWithGeminiOrchestrator({
       
       if (functionCalls.length === 0) {
         // No more function calls, we're done
+        console.log('[DEBUG] No more function calls, exiting loop');
         break;
       }
+
+      console.log('[DEBUG] Found', functionCalls.length, 'function call(s) to execute');
 
       // Add model response to history
       conversationHistory.push({
@@ -495,9 +542,15 @@ async function generateWithGeminiOrchestrator({
         const toolArgs = { ...functionCall.args, userId };
 
         console.log('[Orchestrator] Executing tool:', toolName, 'args:', Object.keys(toolArgs));
+        console.log('[DEBUG] Starting tool execution:', toolName);
+        const toolStartTime = Date.now();
 
         try {
           const toolResult = await executeTool(toolName, toolArgs);
+          const toolDuration = Date.now() - toolStartTime;
+          console.log('[DEBUG] Tool execution completed:', toolName, 'Duration:', toolDuration, 'ms');
+          console.log('[DEBUG] Total elapsed:', Date.now() - startTime, 'ms');
+          
           toolResults.push({ name: toolName, result: toolResult });
 
           console.log('[Orchestrator] Tool result:', toolName, 'success:', toolResult.success);
@@ -513,7 +566,9 @@ async function generateWithGeminiOrchestrator({
             }]
           });
         } catch (toolError) {
+          const toolDuration = Date.now() - toolStartTime;
           console.error('[Orchestrator] Tool execution failed:', toolName, toolError);
+          console.log('[DEBUG] Tool execution failed. Duration:', toolDuration, 'ms');
           
           // Add error response
           conversationHistory.push({
@@ -532,16 +587,26 @@ async function generateWithGeminiOrchestrator({
       }
 
       // Continue the conversation with tool results
+      console.log('[DEBUG] Calling Gemini API (follow-up)...');
+      const followUpStartTime = Date.now();
       response = await ai.models.generateContent({
         model: config.gemini.model,
         contents: conversationHistory,
         config: configOptions
       });
+      console.log('[DEBUG] Follow-up Gemini API response received. Duration:', Date.now() - followUpStartTime, 'ms');
+      console.log('[DEBUG] Iteration', iterationCount + 1, 'total duration:', Date.now() - loopStartTime, 'ms');
+      console.log('[DEBUG] Total elapsed:', Date.now() - startTime, 'ms');
 
       iterationCount++;
     }
+    
+    console.log('[DEBUG] Tool execution loop completed after', iterationCount, 'iterations');
 
     // Extract final result
+    console.log('[DEBUG] Extracting final result...');
+    const resultStartTime = Date.now();
+    
     const finalCandidate = response.candidates?.[0];
     const finalText = finalCandidate?.content?.parts
       ?.filter(part => part.text)
@@ -551,7 +616,12 @@ async function generateWithGeminiOrchestrator({
     // Find generate-image tool result
     const imageResult = toolResults.find(tr => tr.name === 'generate-image');
     
+    console.log('[DEBUG] Result extraction completed. Duration:', Date.now() - resultStartTime, 'ms');
+    console.log('[DEBUG] ========== Total Generation Time:', Date.now() - startTime, 'ms ==========');
+    console.log('[DEBUG] End time:', new Date().toISOString());
+    
     if (imageResult && imageResult.result.success) {
+      console.log('[DEBUG] Returning successful image result');
       return {
         success: true,
         imageUrl: imageResult.result.imageUrl,
@@ -563,6 +633,7 @@ async function generateWithGeminiOrchestrator({
         }))
       };
     } else {
+      console.log('[DEBUG] Returning failure - image generation not completed');
       return {
         success: false,
         error: 'Image generation was not completed',
@@ -575,6 +646,7 @@ async function generateWithGeminiOrchestrator({
     }
   } catch (error) {
     console.error('[Orchestrator] Generation error:', error);
+    console.error('[DEBUG] Error occurred in generateWithGeminiOrchestrator');
     throw error;
   }
 }

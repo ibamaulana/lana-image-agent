@@ -38,7 +38,7 @@ const config = {
 
   // Solana Configuration
   solana: {
-    network: process.env.X402_SOLANA_NETWORK || 'solana-devnet',
+    network: process.env.X402_SOLANA_NETWORK || 'solana',
     rpcUrl: process.env.SOLANA_RPC_URL || (
       process.env.X402_SOLANA_NETWORK === 'solana'
         ? 'https://api.mainnet-beta.solana.com'
@@ -50,7 +50,7 @@ const config = {
   x402: {
     enabled: process.env.X402_ENABLED !== 'false',
     receivingAddress: process.env.X402_SOLANA_RECEIVING_ADDRESS,
-    network: process.env.X402_SOLANA_NETWORK || 'solana-devnet',
+    network: process.env.X402_SOLANA_NETWORK || 'solana',
     priceUsd: process.env.X402_PRICE_USD || '0.06',
     facilitatorUrl: process.env.X402_FACILITATOR_URL || 'https://x402.org/facilitator',
     cdpApiKeyId: process.env.CDP_API_KEY_ID,

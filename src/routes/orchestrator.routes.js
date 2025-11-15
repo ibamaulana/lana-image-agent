@@ -9,6 +9,8 @@ const router = express.Router();
 const { streamGeminiOrchestrator, generateWithGeminiOrchestrator } = require('../services/orchestrator.service');
 const storage = require('../storage'); // Auto-selects PostgreSQL or memory
 const { executeTool } = require('../services/tool-executor.service');
+const { settleResponseFromHeader } = require('x402/types');
+const paymentService = require('../services/payment.service');
 
 /**
  * POST /api/agent/chat
@@ -195,6 +197,150 @@ router.post('/generate', async (req, res) => {
       });
     }
   } catch (error) {
+    console.error('[Agent API] Generate workflow error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Image generation failed'
+    });
+  }
+});
+
+/**
+ * POST /api/agent/generate-x402
+ * LLM-orchestrated image generation with intelligent model selection
+ * Body: { userId, prompt, referenceImages?, preferredModelId?, aspectRatio?, style?, extraParams? }
+ */
+router.post('/generate-x402', async (req, res) => {
+  // Support both camelCase and snake_case naming conventions
+  const prompt = req.body?.prompt;
+  const referenceImages = req.body?.referenceImages || req.body?.reference_images;
+  const startWebhookUrl = req.body?.startWebhookUrl || req.body?.start_webhook_url;
+  const successWebhookUrl = req.body?.successWebhookUrl || req.body?.success_webhook_url;
+  const failureWebhookUrl = req.body?.failureWebhookUrl || req.body?.failure_webhook_url;
+  
+  console.log('[DEBUG] Extracted webhooks:', {
+    startWebhookUrl,
+    successWebhookUrl,
+    failureWebhookUrl
+  });
+  
+  try {
+    // Validate prompt
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'prompt is required and must be a non-empty string'
+      });
+    }
+
+    if (!req.headers['x-payment']) {
+      const paymentRequirements = await paymentService.preparePayment();
+      return res.status(402).json({
+        accepts: paymentRequirements,
+        error: "X-PAYMENT header is required",
+        x402Version: 1
+      });
+    }
+    
+    // start when request header X-PAYMENT is present
+    let paymentMetadata = null;
+    if (req.headers['x-payment']) {
+      if (startWebhookUrl) {
+        console.log('trigger startwebhook on url:', startWebhookUrl);
+        fetch(startWebhookUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            prompt: prompt,
+          })
+        });
+      }
+
+      // Use Gemini orchestrator for intelligent generation
+      const result = await generateWithGeminiOrchestrator({
+        userId: null,
+        prompt: prompt.trim(),
+        referenceImages: referenceImages || [],
+        state: {}
+      });
+
+      if (result.success) {
+        // settle payment
+        const paymentHeader = req.headers['x-payment'];
+        const paymentResponse = await paymentService.settlePayment(paymentHeader);
+        if (!paymentResponse.success) {
+          return res.status(400).json({
+            success: false,
+            error: paymentResponse.error || 'Payment failed'
+          });
+        }
+        paymentMetadata = paymentResponse.settlement;
+        if(successWebhookUrl){
+          console.log('trigger successwebhook on url:', successWebhookUrl);
+          fetch(successWebhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              result: result,
+              paymentMetadata: paymentMetadata
+            })
+          });
+        }
+        res.json({
+          success: true,
+          imageUrl: result.imageUrl,
+          metadata: {
+            ...result.metadata,
+            payment: paymentMetadata
+          },
+          reasoning: result.reasoning,
+          workflow: {
+            toolCalls: result.toolCalls
+          }
+        });
+      } else {
+        if(failureWebhookUrl){
+          console.log('trigger failurewebhook on url:', failureWebhookUrl);
+          fetch(failureWebhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              error: result.error || 'Image generation failed',
+              reasoning: result.reasoning
+            })
+          });
+        }
+        res.status(500).json({
+          success: false,
+          error: result.error || 'Image generation failed',
+          reasoning: result.reasoning,
+          workflow: {
+            toolCalls: result.toolCalls
+          }
+        });
+      }
+      
+    }
+  } catch (error) {
+    console.log('failurewebhook url:', failureWebhookUrl);
+    if(failureWebhookUrl){
+      console.log('trigger failurewebhook on url:', failureWebhookUrl);
+      fetch(failureWebhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          error: error.message || 'Image generation failed',
+        })
+      });
+    }
     console.error('[Agent API] Generate workflow error:', error);
     res.status(500).json({
       success: false,
