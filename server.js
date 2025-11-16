@@ -51,110 +51,110 @@ const x402PriceUsd = process.env.X402_PRICE_USD || '0.06';
 const price = Number(x402PriceUsd);
 const formattedPrice = Number.isFinite(price) ? `$${price.toFixed(2)}` : x402PriceUsd;
 
-// app.use(paymentMiddleware(
-//   x402PayToAddress,
-//   {
-//     'POST /api/agent/generate-x402': {
-//       price: 0.001,
-//       network: 'solana',
-//       config: {
-//         description: 'Create Image with Lana Agent',
-//         maxTimeoutSeconds: 120,
-//         mimeType: 'application/json',
-//         inputSchema: {
-//           type: 'object',
-//           properties: {
-//             prompt: {
-//               type: 'string',
-//               description: 'Primary creative brief for the image'
-//             },
-//             referenceImages: {
-//               type: 'array',
-//               description: 'Optional reference image URLs to steer generation',
-//               items: {
-//                 type: 'string',
-//                 format: 'uri'
-//               }
-//             },
-//             startWebhookUrl: {
-//               type: 'string',
-//               description: 'Optional webhook URL to receive updates about the generation'
-//             },
-//             successWebhookUrl: {
-//               type: 'string',
-//               description: 'Optional webhook URL to receive updates about the generation when the generation is successful'
-//             },
-//             failureWebhookUrl: {
-//               type: 'string',
-//               description: 'Optional webhook URL to receive updates about the generation when the generation fails'
-//             },
-//           },
-//           required: ['prompt'],
-//           additionalProperties: false
-//         },
-//         outputSchema: {
-//           type: 'object',
-//           properties: {
-//             success: { type: 'boolean' },
-//             imageUrl: {
-//               type: 'string',
-//               format: 'uri',
-//               description: 'Generated image URL when success=true'
-//             },
-//             metadata: {
-//               type: 'object',
-//               description: 'Model + render metadata returned by the orchestrator',
-//               properties: {
-//                 model: {
-//                   type: 'object',
-//                   properties: {
-//                     id: { type: 'string' },
-//                     name: { type: 'string' },
-//                     fullName: { type: 'string' }
-//                   }
-//                 },
-//                 prompt: { type: 'string' },
-//                 negativePrompt: { type: 'string', nullable: true },
-//                 referenceImages: {
-//                   type: 'array',
-//                   items: { type: 'string', format: 'uri' }
-//                 },
-//                 aspectRatio: { type: 'string' },
-//                 style: { type: 'string' },
-//                 size: { type: 'string' }
-//               }
-//             },
-//             reasoning: {
-//               type: 'string',
-//               description: 'LLM explanation of the workflow'
-//             },
-//             workflow: {
-//               type: 'object',
-//               properties: {
-//                 toolCalls: {
-//                   type: 'array',
-//                   items: {
-//                     type: 'object',
-//                     properties: {
-//                       tool: { type: 'string' },
-//                       success: { type: 'boolean' }
-//                     }
-//                   }
-//                 }
-//               }
-//             },
-//             error: {
-//               type: 'string',
-//               description: 'Error message when success=false'
-//             }
-//           }
-//         },
-//         discoverable: true
-//       }
-//     }
-//   },
-//   facilitator
-// ));
+app.use(paymentMiddleware(
+  x402PayToAddress,
+  {
+    'POST /api/agent/generate-x402-simple': {
+      price: 0.001,
+      network: 'solana',
+      config: {
+        description: 'Create Image with Lana Agent',
+        maxTimeoutSeconds: 120,
+        mimeType: 'application/json',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            prompt: {
+              type: 'string',
+              description: 'Primary creative brief for the image'
+            },
+            referenceImages: {
+              type: 'array',
+              description: 'Optional reference image URLs to steer generation',
+              items: {
+                type: 'string',
+                format: 'uri'
+              }
+            },
+            startWebhookUrl: {
+              type: 'string',
+              description: 'Optional webhook URL to receive updates about the generation'
+            },
+            successWebhookUrl: {
+              type: 'string',
+              description: 'Optional webhook URL to receive updates about the generation when the generation is successful'
+            },
+            failureWebhookUrl: {
+              type: 'string',
+              description: 'Optional webhook URL to receive updates about the generation when the generation fails'
+            },
+          },
+          required: ['prompt'],
+          additionalProperties: false
+        },
+        outputSchema: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean' },
+            imageUrl: {
+              type: 'string',
+              format: 'uri',
+              description: 'Generated image URL when success=true'
+            },
+            metadata: {
+              type: 'object',
+              description: 'Model + render metadata returned by the orchestrator',
+              properties: {
+                model: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    fullName: { type: 'string' }
+                  }
+                },
+                prompt: { type: 'string' },
+                negativePrompt: { type: 'string', nullable: true },
+                referenceImages: {
+                  type: 'array',
+                  items: { type: 'string', format: 'uri' }
+                },
+                aspectRatio: { type: 'string' },
+                style: { type: 'string' },
+                size: { type: 'string' }
+              }
+            },
+            reasoning: {
+              type: 'string',
+              description: 'LLM explanation of the workflow'
+            },
+            workflow: {
+              type: 'object',
+              properties: {
+                toolCalls: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      tool: { type: 'string' },
+                      success: { type: 'boolean' }
+                    }
+                  }
+                }
+              }
+            },
+            error: {
+              type: 'string',
+              description: 'Error message when success=false'
+            }
+          }
+        },
+        discoverable: true
+      }
+    }
+  },
+  facilitator
+));
 
 // Orchestrator routes (Gemini-powered conversational agent)
 if (config.features.orchestratorEnabled) {

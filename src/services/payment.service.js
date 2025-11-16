@@ -274,7 +274,7 @@ class PaymentService {
         }
       };
     } catch (error) {
-      console.error('[Payment Service] Error during facilitatorClient.settle:', {
+      console.log('[Payment Service] Error during facilitatorClient.settle:', {
         message: error.message,
         stack: error.stack,
         decodedPayment,

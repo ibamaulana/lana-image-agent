@@ -11,6 +11,7 @@ const storage = require('../storage'); // Auto-selects PostgreSQL or memory
 const { executeTool } = require('../services/tool-executor.service');
 const { settleResponseFromHeader } = require('x402/types');
 const paymentService = require('../services/payment.service');
+const bs58 = require('bs58');
 
 /**
  * POST /api/agent/chat
@@ -262,7 +263,8 @@ router.post('/generate-x402', async (req, res) => {
           error: paymentResponse.error || 'Payment failed'
         });
       }
-      console.log('payment verified:', paymentResponse);
+      // console.log('payment verified:', paymentResponse);
+      // console.log('payer:', paymentResponse.verification.payer, bs58.default.decode(paymentResponse.verification.payer));
 
       if (startWebhookUrl) {
         console.log('trigger startwebhook on url:', startWebhookUrl);
@@ -355,6 +357,155 @@ router.post('/generate-x402', async (req, res) => {
         });
       }
       
+    }
+  } catch (error) {
+    console.log('failurewebhook url:', failureWebhookUrl);
+    if(failureWebhookUrl){
+      console.log('trigger failurewebhook on url:', failureWebhookUrl);
+      fetch(failureWebhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          error: error.message || 'Image generation failed',
+        })
+      });
+    }
+    console.error('[Agent API] Generate workflow error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Image generation failed'
+    });
+  }
+});
+
+/**
+ * POST /api/agent/generate-x402
+ * LLM-orchestrated image generation with intelligent model selection
+ * Body: { userId, prompt, referenceImages?, preferredModelId?, aspectRatio?, style?, extraParams? }
+ */
+router.post('/generate-x402-simple', async (req, res) => {
+  // Support both camelCase and snake_case naming conventions
+  const prompt = req.body?.prompt;
+  const referenceImages = req.body?.referenceImages || req.body?.reference_images;
+  const startWebhookUrl = req.body?.startWebhookUrl || req.body?.start_webhook_url;
+  const successWebhookUrl = req.body?.successWebhookUrl || req.body?.success_webhook_url;
+  const failureWebhookUrl = req.body?.failureWebhookUrl || req.body?.failure_webhook_url;
+  
+  console.log('[DEBUG] Extracted webhooks:', {
+    startWebhookUrl,
+    successWebhookUrl,
+    failureWebhookUrl
+  });
+
+  let paymentMetadata = {}
+  
+  try {
+    // Validate prompt
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'prompt is required and must be a non-empty string'
+      });
+    }
+    
+    if (startWebhookUrl) {
+      console.log('trigger startwebhook on url:', startWebhookUrl);
+      fetch(startWebhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          prompt: prompt,
+        })
+      });
+    }
+
+    // Use Gemini orchestrator for intelligent generation
+    const result = await generateWithGeminiOrchestrator({
+      userId: null,
+      prompt: prompt.trim(),
+      referenceImages: referenceImages || [],
+      state: {}
+    });
+
+    res.on('finish', async () => {
+      console.log("res on finish with result:",result)
+      if (res.statusCode >= 400) {
+        return;
+      }
+
+      const headerValue = res.getHeader('X-PAYMENT-RESPONSE');
+      const paymentHeader = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+
+      if (!paymentHeader) {
+        console.warn('x402 payment header missing on generation creation response');
+        return;
+      }
+
+      const settleResponse = settleResponseFromHeader(String(paymentHeader));
+      if(successWebhookUrl){
+        console.log('trigger successwebhook on url:', successWebhookUrl);
+        fetch(successWebhookUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            result: result,
+            paymentMetadata: settleResponse
+          })
+        });
+      }
+    });
+
+    if (result.success) {
+      res.json({
+        success: true,
+        imageUrl: result.imageUrl,
+        metadata: {
+          ...result.metadata,
+          payment: paymentMetadata
+        },
+        reasoning: result.reasoning,
+        refinedData: result.refinedData,
+        safetyCheck: result.safetyCheck,
+        phaseTimings: result.phaseTimings,
+        workflow: {
+          toolCalls: result.toolCalls
+        }
+      });
+    } else {
+      if(failureWebhookUrl){
+        console.log('trigger failurewebhook on url:', failureWebhookUrl);
+        fetch(failureWebhookUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            error: result.error || 'Image generation failed',
+            reasoning: result.reasoning,
+            safetyCheck: result.safetyCheck
+          })
+        });
+      }
+      
+      // Check if it's a content policy violation
+      const statusCode = result.safetyCheck?.safe === false ? 400 : 500;
+      
+      res.status(statusCode).json({
+        success: false,
+        error: result.error || 'Image generation failed',
+        safetyCheck: result.safetyCheck,
+        phaseTimings: result.phaseTimings,
+        reasoning: result.reasoning,
+        workflow: {
+          toolCalls: result.toolCalls
+        }
+      });
     }
   } catch (error) {
     console.log('failurewebhook url:', failureWebhookUrl);
