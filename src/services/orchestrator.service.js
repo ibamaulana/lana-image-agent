@@ -135,7 +135,7 @@ Your workflow for generating images:
    - **For image-to-image (with reference images):**
      * Examine the inputSchema to see if it has image input parameters
      * Look for parameters with isImageInput=true (excluding mask parameters with isMask=true)
-     * Mask parameters are for inpainting/editing, not standard image-to-image generation
+     * Avoid model that has mask parameters
      * For 1 reference: choose models with single image input parameter (e.g., "image")
      * For 2+ references: choose models with array image input (e.g., "images" with type "array")
      * Match model strengths to user intent (style transfer, reimagination, etc.)
@@ -150,16 +150,17 @@ Your workflow for generating images:
    **CRITICAL: Different approach for reference images vs. text-only:**
    
    **When reference images are provided:**
-   - The reference image DEFINES the subject - DO NOT change or describe the subject
-   - Keep the prompt MINIMAL and GENERAL
-   - Only add style/quality tags that complement the transformation
-   - Examples:
-     * User: "change this to anime style" → Prompt: "anime style, vibrant colors, clean lines"
-     * User: "make it photorealistic" → Prompt: "photorealistic, highly detailed, sharp focus"
-     * User: "add dramatic lighting" → Prompt: "dramatic lighting, cinematic, high contrast"
-   - DO NOT add subject descriptions (like "girl", "horse", "building") - the reference already has the subject
-   - The reference image is the source of truth for WHAT to generate
-   - The prompt should only describe HOW to transform/stylize it
+    - The reference image DEFINES the subject - DO NOT change or describe the subject
+    - Keep the prompt MINIMAL and GENERAL
+    - Simply ensure the prompt references the image, then include the user's intent
+    - Examples:
+      * User: "change this to anime style" → Prompt: "based on this reference image, anime style, vibrant colors, clean lines"
+      * User: "add multiple hands" → Prompt: "based on this reference image, add multiple hands"
+      * User: "make it photorealistic" → Prompt: "based on this reference image, photorealistic, highly detailed, sharp focus"
+      * User: "remove the background" → Prompt: "based on this reference image, remove the background, clean edges"
+    - DO NOT add unnecessary subject descriptions (like "girl", "horse", "building") - the reference already has the subject
+    - The reference image is the source of truth for WHAT to generate
+    - The prompt should start with "based on this reference image," followed by the user's requested modifications
    
    **When NO reference images (text-to-image only):**
    - Enhance the user's prompt with quality tags and descriptive details
@@ -428,134 +429,447 @@ async function streamGeminiOrchestrator({
 }
 
 /**
- * Non-streaming Gemini orchestrator for image generation
- * Returns JSON result without streaming
+ * Helper function to fetch image as base64 for multimodal analysis
  */
-async function generateWithGeminiOrchestrator({
+async function fetchImageAsBase64(imageUrl) {
+  try {
+    const axios = require('axios');
+    const response = await axios.get(imageUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000 // 10 second timeout
+    });
+    
+    const buffer = Buffer.from(response.data);
+    const base64 = buffer.toString('base64');
+    
+    // Detect mime type from response headers or URL
+    let mimeType = response.headers['content-type'] || 'image/jpeg';
+    if (!mimeType.startsWith('image/')) {
+      // Fallback mime type detection from URL
+      if (imageUrl.toLowerCase().endsWith('.png')) mimeType = 'image/png';
+      else if (imageUrl.toLowerCase().endsWith('.gif')) mimeType = 'image/gif';
+      else if (imageUrl.toLowerCase().endsWith('.webp')) mimeType = 'image/webp';
+      else mimeType = 'image/jpeg';
+    }
+    
+    return { base64, mimeType };
+  } catch (error) {
+    console.error('[Image Fetch] Failed to fetch image:', imageUrl, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Build multimodal parts for Gemini (text + images)
+ */
+async function buildMultimodalParts(text, imageUrls = []) {
+  const parts = [{ text }];
+  
+  for (const imageUrl of imageUrls) {
+    try {
+      const { base64, mimeType } = await fetchImageAsBase64(imageUrl);
+      parts.push({
+        inlineData: {
+          mimeType,
+          data: base64
+        }
+      });
+    } catch (error) {
+      console.warn('[Multimodal] Skipping image due to fetch error:', imageUrl);
+      // Add a text note about the failed image
+      parts.push({ text: `\n[Note: Could not load reference image: ${imageUrl}]` });
+    }
+  }
+  
+  return parts;
+}
+
+/**
+ * Get user-friendly error message based on safety category
+ */
+function getSafetyErrorMessage(category) {
+  const messages = {
+    nsfw: 'Your request contains adult or sexually explicit content which is not allowed. Please revise your prompt to be family-friendly.',
+    child_safety: 'Your request may involve content related to minors in an inappropriate context. This is strictly prohibited for safety reasons.',
+    violence: 'Your request contains graphic violence or gore which exceeds our content guidelines. Please consider a less explicit approach.',
+    illegal: 'Your request involves illegal activities or content which we cannot generate.',
+    error: 'We were unable to verify the safety of your request. Please try rephrasing your prompt.'
+  };
+  
+  return messages[category] || 'Your request violates our content policy. Please revise and try again.';
+}
+
+/**
+ * Phase 0: Content Safety Check
+ * Analyzes both text prompt and reference images for prohibited content
+ */
+async function checkContentSafety({
+  prompt,
+  referenceImages = []
+}) {
+    const ai = getGeminiClient();
+  
+  const safetySystemPrompt = `You are a content safety moderator for an AI image generation service.
+
+Your job is to analyze user prompts AND reference images to determine if they contain prohibited content.
+
+**PROHIBITED CONTENT:**
+1. **NSFW/Adult Content:**
+   - Sexually explicit content
+   - Nudity or sexual acts
+   - Adult/pornographic themes
+   - Suggestive or sexual content
+   - Revealing clothing or poses with sexual intent
+   
+2. **Child Safety (STRICT):**
+   - Any content involving minors in inappropriate contexts
+   - Child exploitation or endangerment
+   - Sexualization of minors
+   - Children in revealing clothing or suggestive poses
+   - ANY combination of children + inappropriate context
+   
+3. **Violence/Gore:**
+   - Extreme violence or graphic gore
+   - Realistic depictions of serious harm or death
+   - Excessive blood or mutilation
+   
+4. **Illegal Content:**
+   - Illegal activities or promotion thereof
+   - Weapons being used to harm people
+   - Drug manufacturing or use
+
+**ALLOWED CONTENT:**
+- Artistic nudity in classical art context (statues, famous paintings)
+- Medical/educational anatomy diagrams
+- Fashion/swimwear in appropriate adult modeling context
+- Age-appropriate content suitable for all audiences
+- Fantasy violence (gaming, comics) without realistic gore
+- Historical or documentary content with context
+
+**When analyzing REFERENCE IMAGES:**
+- Look at the actual visual content
+- Consider what the user might be trying to replicate or modify
+- If an image shows prohibited content, flag it even if the text prompt seems innocent
+- Consider the combination of image + text prompt
+
+**Analysis Instructions:**
+1. Read the user's text prompt carefully
+2. Examine any reference images provided
+3. Consider context and intent from both text and images
+4. Be EXTREMELY strict about child safety - ANY doubt should flag it
+5. Be reasonable about artistic expression for adults
+6. Consider if combining the text + images creates problematic intent
+
+**Output Format (JSON only, no markdown):**
+{
+  "safe": true or false,
+  "reason": "Brief explanation if unsafe, empty string if safe",
+  "category": "nsfw" | "child_safety" | "violence" | "illegal" | "safe",
+  "confidence": 0.0 to 1.0
+}
+
+Examples:
+- Text: "a beautiful sunset" + No images → {"safe": true, "reason": "", "category": "safe", "confidence": 1.0}
+- Text: "make this sexier" + Image of person → {"safe": false, "reason": "Request to sexualize content", "category": "nsfw", "confidence": 0.9}
+- Text: "anime style" + Image of child → {"safe": false, "reason": "Child in reference image with transformation request", "category": "child_safety", "confidence": 0.95}
+- Text: "epic battle scene" + No images → {"safe": true, "reason": "", "category": "safe", "confidence": 0.95}
+
+Output ONLY valid JSON, no other text.`;
+
+  let userMessage = `Analyze this for content safety:\n\nTEXT PROMPT: "${prompt}"`;
+  
+  if (referenceImages.length > 0) {
+    userMessage += `\n\nREFERENCE IMAGES: ${referenceImages.length} image(s) provided below. Please examine them carefully.`;
+  }
+
+  console.log('[Phase 0 - Safety] Analyzing prompt and', referenceImages.length, 'reference image(s)...');
+
+  try {
+    // Build multimodal parts (text + images)
+    const parts = await buildMultimodalParts(userMessage, referenceImages);
+
+    const response = await ai.models.generateContent({
+      model: "gemini-flash-latest",
+      contents: [{
+        role: 'user',
+        parts
+      }],
+      config: {
+        systemInstruction: {
+          parts: [{ text: safetySystemPrompt }]
+        },
+        generationConfig: {
+          temperature: 0.2, // Very low temperature for consistent safety decisions
+          maxOutputTokens: 512
+        }
+      }
+    });
+
+    const responseText = response.candidates?.[0]?.content?.parts
+      ?.filter(part => part.text)
+      ?.map(part => part.text)
+      ?.join('') || '';
+
+    // Parse JSON from response
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      // If we can't parse the safety response, fail safe and reject
+      console.error('[Phase 0 - Safety] Failed to parse safety response');
+      return {
+        safe: false,
+        reason: 'Unable to verify content safety',
+        category: 'error',
+        confidence: 1.0
+      };
+    }
+
+    const safetyResult = JSON.parse(jsonMatch[0]);
+    console.log('[Phase 0 - Safety] Result:', safetyResult);
+    
+    return safetyResult;
+  } catch (error) {
+    console.error('[Phase 0 - Safety] Error during safety check:', error);
+    // Fail safe: reject on error
+    return {
+      safe: false,
+      reason: 'Error during safety verification',
+      category: 'error',
+      confidence: 1.0
+    };
+  }
+}
+
+/**
+ * Phase 1: Prompt Refiner
+ * Analyzes prompt and reference images to output structured refinement data
+ */
+async function refinePromptWithGemini({
   userId,
   prompt,
-  referenceImages = [],
+  referenceImages = []
+}) {
+  const ai = getGeminiClient();
+  
+  const refinerSystemPrompt = `You are a prompt refinement specialist for AI image generation.
+
+Your job is to analyze the user's request (text + any reference images) and output a structured JSON response.
+
+**If reference images are provided:**
+- Mode: "image_to_image"
+- EXAMINE the reference images to understand what the user is working with
+- Keep refined_prompt MINIMAL and GENERAL - the reference defines the subject
+- Focus on the transformation/style the user wants
+- Example: User says "make this anime style" + shows photo → refined_prompt: "anime style transformation, vibrant colors, clean lines, detailed illustration"
+
+**If NO reference images (text-to-image):**
+- Mode: "text_to_image"
+- ENHANCE the prompt with quality tags and descriptive details
+- Example: "a horse" → "a majestic horse running through a field at sunrise, highly detailed, professional photography, sharp focus, 8k, dramatic lighting"
+
+**Output Format (JSON only, no markdown):**
+{
+  "mode": "text_to_image" or "image_to_image",
+  "title": "Creative 3-8 word title for the image",
+  "refined_prompt": "The refined prompt string",
+  "aspect_ratio": "1:1" | "16:9" | "9:16" | "4:5",
+  "style": "photorealistic" | "anime" | "artistic" | "digital-art" | "fantasy" | "cinematic" | etc.,
+  "referenceImages": ["url1", "url2"]
+}
+
+**Aspect Ratio Guidelines:**
+- If reference images provided: analyze their aspect ratio and match it
+- Portrait/person/selfie → "9:16"
+- Landscape/wide/panorama → "16:9"
+- Square/icon/logo → "1:1"
+- Social media post → "4:5"
+
+**Style Guidelines:**
+Infer from user's language, intent, and reference images:
+- "realistic", "photo" → "photorealistic"
+- "anime", "manga", "cartoon" → "anime"
+- "painting", "art", "watercolor" → "artistic"
+- "3d render", "cgi" → "digital-art"
+- "movie", "film" → "cinematic"
+- If reference images: try to match their visual style
+
+**Title Creation:**
+- With reference images: Focus on transformation (e.g., "Anime Style Transformation", "Dramatic Cinematic Rendering")
+- Without reference images: Describe the scene (e.g., "Majestic Horse at Golden Sunrise")
+
+Output ONLY valid JSON, no other text.`;
+
+  let userMessage = `Refine this image generation request:\n\nUSER PROMPT: "${prompt}"`;
+  
+  if (referenceImages.length > 0) {
+    userMessage += `\n\nREFERENCE IMAGES: ${referenceImages.length} image(s) provided below. Examine them to understand what the user wants to transform or use as inspiration.`;
+  }
+
+  console.log('[Phase 1 - Refiner] Analyzing prompt and', referenceImages.length, 'reference image(s)...');
+
+  try {
+    // Build multimodal parts (text + images)
+    const parts = await buildMultimodalParts(userMessage, referenceImages);
+
+    const response = await ai.models.generateContent({
+      model: "gemini-flash-latest",
+      contents: [{
+        role: 'user',
+        parts
+      }],
+      config: {
+        systemInstruction: {
+          parts: [{ text: refinerSystemPrompt }]
+        },
+        generationConfig: {
+          temperature: 0.5,
+          maxOutputTokens: 1024
+        }
+      }
+    });
+
+    const responseText = response.candidates?.[0]?.content?.parts
+      ?.filter(part => part.text)
+      ?.map(part => part.text)
+      ?.join('') || '';
+
+    // Parse JSON from response
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Failed to extract JSON from refiner response');
+    }
+
+    const refinedData = JSON.parse(jsonMatch[0]);
+    
+    // Ensure referenceImages array is included
+    refinedData.referenceImages = referenceImages;
+    
+    console.log('[Phase 1 - Refiner] Output:', refinedData);
+    
+    return refinedData;
+  } catch (error) {
+    console.error('[Phase 1 - Refiner] Error during refinement:', error);
+    throw error;
+  }
+}
+
+/**
+ * Phase 2: Image Generation Agent
+ * Uses refined data to select model and generate image
+ */
+async function generateImageWithAgent({
+  userId,
+  refinedData,
   state = {}
 }) {
-  try {
-    const startTime = Date.now();
-    console.log('[DEBUG] ========== Starting generateWithGeminiOrchestrator ==========');
-    console.log('[DEBUG] Start time:', new Date().toISOString());
-    
-    const ai = getGeminiClient();
-    const tools = getToolDefinitions();
-    const systemPrompt = buildSystemInstruction(state);
-    
-    console.log('[DEBUG] Client initialized. Elapsed:', Date.now() - startTime, 'ms');
+  const ai = getGeminiClient();
+  const tools = getToolDefinitions();
+  
+  const agentSystemPrompt = `You are an AI image generation agent.
 
-    // Normalize referenceImages to array
-    let normalizedReferences = [];
-    if (referenceImages) {
-      if (Array.isArray(referenceImages)) {
-        normalizedReferences = referenceImages.filter(ref => typeof ref === 'string' && ref.trim().length > 0);
-      } else if (typeof referenceImages === 'string' && referenceImages.trim().length > 0) {
-        normalizedReferences = [referenceImages.trim()];
-      }
-    }
+You receive a refined prompt specification and must execute EXACTLY this workflow:
 
-    // Build user message
-    let userMessage = prompt;
-    if (normalizedReferences.length > 0) {
-      userMessage += `\n\nReference images (${normalizedReferences.length}):\n${normalizedReferences.map((url, i) => `${i + 1}. ${url}`).join('\n')}`;
-    }
+1. **Call list_models ONCE** to get available models
+   - Use referenceImageCount parameter based on the mode:
+     * image_to_image with 1 reference: referenceImageCount=1
+     * image_to_image with 2+ references: referenceImageCount=2
+     * text_to_image: no referenceImageCount parameter
 
-    const contents = [
-      {
-        role: 'user',
-        parts: [{ text: userMessage }]
-      }
-    ];
+2. **Analyze the inputSchema** and select THE BEST model (only one)
+   - For image_to_image: find models with isImageInput parameters, exclude models with mask parameters
+   - Match model strengths to the style requirement
+   - Consider popularity (runCount)
+   - Prefer models with good quality and appropriate capabilities
+
+3. **Call generate_image ONCE** with your selected model:
+   - Your selected modelId (only the best one)
+   - The refined_prompt provided to you
+   - The title, aspect_ratio, style, and referenceImages from the input
+   - Add appropriate negativePrompt: "blurry, low quality, distorted, ugly, bad anatomy, watermark, text"
+
+IMPORTANT: 
+- Call list_models ONCE
+- Select ONE best model
+- Call generate_image ONCE
+- STOP after successful generation - do not try other models`;
+
+  const inputSpec = JSON.stringify(refinedData, null, 2);
+  
+  console.log('[Phase 2 - Agent] Starting generation with refined data');
+  console.log('[Phase 2 - Agent] Mode:', refinedData.mode);
+  console.log('[Phase 2 - Agent] Style:', refinedData.style);
+  console.log('[Phase 2 - Agent] References:', refinedData.referenceImages?.length || 0);
+
+  const contents = [{
+    role: 'user',
+    parts: [{ text: `Generate image with this specification:\n${inputSpec}` }]
+  }];
 
     const configOptions = {
       systemInstruction: {
-        parts: [{ text: systemPrompt }]
+      parts: [{ text: agentSystemPrompt }]
       },
       generationConfig: {
-        temperature: 0.7,
+      temperature: 0.3,
         maxOutputTokens: 2048
       },
       tools
     };
 
-    console.log('[Orchestrator] Starting non-streaming generation for user:', userId);
-    console.log('[Orchestrator] Prompt:', prompt.substring(0, 80));
-    console.log('[Orchestrator] Reference Images:', normalizedReferences.length);
-    console.log('[DEBUG] Request prepared. Elapsed:', Date.now() - startTime, 'ms');
-
-    // Initial LLM call
-    console.log('[DEBUG] Calling Gemini API (initial)...');
-    const llmStartTime = Date.now();
     let response = await ai.models.generateContent({
       model: config.gemini.model,
       contents,
       config: configOptions
     });
-    console.log('[DEBUG] Initial Gemini API response received. Duration:', Date.now() - llmStartTime, 'ms');
-    console.log('[DEBUG] Total elapsed:', Date.now() - startTime, 'ms');
 
     const toolResults = [];
     const conversationHistory = [...contents];
     let iterationCount = 0;
     const maxIterations = 10;
 
-    // Loop through tool calls
-    console.log('[DEBUG] Starting tool execution loop...');
+  // Tool execution loop
     while (iterationCount < maxIterations) {
-      const loopStartTime = Date.now();
-      console.log('[DEBUG] --- Iteration', iterationCount + 1, '---');
-      
       const candidates = response.candidates || [];
-      if (candidates.length === 0) {
-        console.log('[DEBUG] No candidates found, exiting loop');
-        break;
-      }
+    if (candidates.length === 0) break;
 
       const candidate = candidates[0];
       const parts = candidate.content?.parts || [];
-      
-      // Check for function calls
       const functionCalls = parts.filter(part => part.functionCall);
       
-      if (functionCalls.length === 0) {
-        // No more function calls, we're done
-        console.log('[DEBUG] No more function calls, exiting loop');
-        break;
-      }
+    if (functionCalls.length === 0) break;
 
-      console.log('[DEBUG] Found', functionCalls.length, 'function call(s) to execute');
-
-      // Add model response to history
       conversationHistory.push({
         role: 'model',
         parts: candidate.content?.parts || []
       });
 
-      // Execute each function call
       for (const part of functionCalls) {
         const functionCall = part.functionCall;
         const toolName = functionCall.name.replace(/_/g, '-');
         const toolArgs = { ...functionCall.args, userId };
 
-        console.log('[Orchestrator] Executing tool:', toolName, 'args:', Object.keys(toolArgs));
-        console.log('[DEBUG] Starting tool execution:', toolName);
-        const toolStartTime = Date.now();
+        console.log('[Phase 2 - Agent] Executing tool:', toolName);
 
         try {
           const toolResult = await executeTool(toolName, toolArgs);
-          const toolDuration = Date.now() - toolStartTime;
-          console.log('[DEBUG] Tool execution completed:', toolName, 'Duration:', toolDuration, 'ms');
-          console.log('[DEBUG] Total elapsed:', Date.now() - startTime, 'ms');
-          
           toolResults.push({ name: toolName, result: toolResult });
 
-          console.log('[Orchestrator] Tool result:', toolName, 'success:', toolResult.success);
+          console.log('[Phase 2 - Agent] Tool result:', toolName, 'success:', toolResult.success);
 
-          // Add function response to history
+          // If this is a successful image generation, return immediately
+          if (toolName === 'generate-image' && toolResult.success) {
+            console.log('[Phase 2 - Agent] ✓ Image generated successfully, returning result');
+            return {
+              success: true,
+              imageUrl: toolResult.imageUrl,
+              metadata: toolResult.metadata,
+              refinedData,
+              toolCalls: toolResults.map(tr => ({
+                tool: tr.name,
+                success: tr.result.success
+              }))
+            };
+          }
+
           conversationHistory.push({
             role: 'user',
             parts: [{
@@ -566,11 +880,7 @@ async function generateWithGeminiOrchestrator({
             }]
           });
         } catch (toolError) {
-          const toolDuration = Date.now() - toolStartTime;
-          console.error('[Orchestrator] Tool execution failed:', toolName, toolError);
-          console.log('[DEBUG] Tool execution failed. Duration:', toolDuration, 'ms');
-          
-          // Add error response
+          console.error('[Phase 2 - Agent] Tool execution failed:', toolName, toolError);
           conversationHistory.push({
             role: 'user',
             parts: [{
@@ -586,67 +896,157 @@ async function generateWithGeminiOrchestrator({
         }
       }
 
-      // Continue the conversation with tool results
-      console.log('[DEBUG] Calling Gemini API (follow-up)...');
-      const followUpStartTime = Date.now();
       response = await ai.models.generateContent({
         model: config.gemini.model,
         contents: conversationHistory,
         config: configOptions
       });
-      console.log('[DEBUG] Follow-up Gemini API response received. Duration:', Date.now() - followUpStartTime, 'ms');
-      console.log('[DEBUG] Iteration', iterationCount + 1, 'total duration:', Date.now() - loopStartTime, 'ms');
-      console.log('[DEBUG] Total elapsed:', Date.now() - startTime, 'ms');
 
       iterationCount++;
     }
     
-    console.log('[DEBUG] Tool execution loop completed after', iterationCount, 'iterations');
-
-    // Extract final result
-    console.log('[DEBUG] Extracting final result...');
-    const resultStartTime = Date.now();
-    
-    const finalCandidate = response.candidates?.[0];
-    const finalText = finalCandidate?.content?.parts
-      ?.filter(part => part.text)
-      ?.map(part => part.text)
-      ?.join('') || '';
-
-    // Find generate-image tool result
+  // Extract result
     const imageResult = toolResults.find(tr => tr.name === 'generate-image');
     
-    console.log('[DEBUG] Result extraction completed. Duration:', Date.now() - resultStartTime, 'ms');
-    console.log('[DEBUG] ========== Total Generation Time:', Date.now() - startTime, 'ms ==========');
-    console.log('[DEBUG] End time:', new Date().toISOString());
-    
     if (imageResult && imageResult.result.success) {
-      console.log('[DEBUG] Returning successful image result');
       return {
         success: true,
         imageUrl: imageResult.result.imageUrl,
         metadata: imageResult.result.metadata,
-        reasoning: finalText,
+      refinedData,
         toolCalls: toolResults.map(tr => ({
           tool: tr.name,
           success: tr.result.success
         }))
       };
     } else {
-      console.log('[DEBUG] Returning failure - image generation not completed');
       return {
         success: false,
         error: 'Image generation was not completed',
-        reasoning: finalText,
         toolCalls: toolResults.map(tr => ({
           tool: tr.name,
           success: tr.result.success
         }))
       };
     }
+}
+
+/**
+ * Three-phase Gemini orchestrator for image generation
+ * Phase 0: Content safety check (with image analysis)
+ * Phase 1: Prompt refinement (with image analysis)
+ * Phase 2: Model selection & generation (with tools)
+ */
+async function generateWithGeminiOrchestrator({
+  userId,
+  prompt,
+  referenceImages = [],
+  state = {}
+}) {
+  try {
+    const startTime = Date.now();
+    console.log('[Orchestrator] ========== Starting Three-Phase Generation ==========');
+    console.log('[Orchestrator] User:', userId);
+    console.log('[Orchestrator] Prompt:', prompt.substring(0, 100));
+    
+    // Normalize reference images
+    let normalizedReferences = [];
+    if (referenceImages) {
+      if (Array.isArray(referenceImages)) {
+        normalizedReferences = referenceImages.filter(ref => 
+          typeof ref === 'string' && ref.trim().length > 0
+        );
+      } else if (typeof referenceImages === 'string' && referenceImages.trim().length > 0) {
+        normalizedReferences = [referenceImages.trim()];
+      }
+    }
+    
+    console.log('[Orchestrator] Reference Images:', normalizedReferences.length);
+
+    // ===== PHASE 0: Content Safety Check =====
+    console.log('[Phase 0] Starting content safety check...');
+    const phaseZeroStart = Date.now();
+    
+    const safetyResult = await checkContentSafety({
+      prompt,
+      referenceImages: normalizedReferences
+    });
+    
+    const phaseZeroDuration = Date.now() - phaseZeroStart;
+    console.log('[Phase 0] Completed in', phaseZeroDuration, 'ms');
+    console.log('[Phase 0] Result:', safetyResult.safe ? 'SAFE' : 'UNSAFE -', safetyResult.category);
+
+    // If content is not safe, return error immediately
+    if (!safetyResult.safe) {
+      console.warn('[Phase 0] Content flagged as', safetyResult.category);
+      return {
+        success: false,
+        error: 'Content policy violation',
+        safetyCheck: {
+          safe: false,
+          reason: safetyResult.reason,
+          category: safetyResult.category,
+          message: getSafetyErrorMessage(safetyResult.category),
+          confidence: safetyResult.confidence
+        },
+        phaseTimings: {
+          safety: phaseZeroDuration,
+          total: Date.now() - startTime
+        }
+      };
+    }
+
+    console.log('[Phase 0] ✓ Content approved, proceeding to refinement');
+
+    // ===== PHASE 1: Prompt Refinement =====
+    console.log('[Phase 1] Starting prompt refinement...');
+    const phaseOneStart = Date.now();
+    
+    const refinedData = await refinePromptWithGemini({
+      userId,
+      prompt,
+      referenceImages: normalizedReferences
+    });
+    
+    const phaseOneDuration = Date.now() - phaseOneStart;
+    console.log('[Phase 1] Completed in', phaseOneDuration, 'ms');
+    console.log('[Phase 1] Mode:', refinedData.mode);
+    console.log('[Phase 1] Title:', refinedData.title);
+    console.log('[Phase 1] Style:', refinedData.style);
+
+    // ===== PHASE 2: Image Generation =====
+    console.log('[Phase 2] Starting image generation...');
+    const phaseTwoStart = Date.now();
+    
+    const result = await generateImageWithAgent({
+      userId,
+      refinedData,
+      state
+    });
+    
+    const phaseTwoDuration = Date.now() - phaseTwoStart;
+    console.log('[Phase 2] Completed in', phaseTwoDuration, 'ms');
+
+    const totalDuration = Date.now() - startTime;
+    console.log('[Orchestrator] ========== Total Time:', totalDuration, 'ms ==========');
+    
+    // Add safety check and timing info to successful response
+    return {
+      ...result,
+      safetyCheck: {
+        safe: true,
+        category: 'safe',
+        confidence: safetyResult.confidence
+      },
+      phaseTimings: {
+        safety: phaseZeroDuration,
+        refinement: phaseOneDuration,
+        generation: phaseTwoDuration,
+        total: totalDuration
+      }
+    };
   } catch (error) {
     console.error('[Orchestrator] Generation error:', error);
-    console.error('[DEBUG] Error occurred in generateWithGeminiOrchestrator');
     throw error;
   }
 }
@@ -654,5 +1054,7 @@ async function generateWithGeminiOrchestrator({
 module.exports = {
   streamGeminiOrchestrator,
   generateWithGeminiOrchestrator,
-  getToolDefinitions
+  getToolDefinitions,
+  checkContentSafety,
+  getSafetyErrorMessage
 };

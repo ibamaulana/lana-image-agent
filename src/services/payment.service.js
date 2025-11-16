@@ -52,7 +52,7 @@ class PaymentService {
       console.warn('⚠️  X402_SOLANA_RECEIVING_ADDRESS not set. Payments will be disabled.');
     }
 
-    console.log('[Payment Service] Initialized with facilitator:', this.facilitatorUrl);
+    console.log('[Payment Service] Initialized with facilitator:', facilitator);
     console.log('[Payment Service] Network:', this.x402Network);
     console.log('[Payment Service] Pay to:', this.x402PayToAddress?.substring(0, 8) + '...');
   }
@@ -96,7 +96,7 @@ class PaymentService {
       scheme: 'exact',
       network: targetNetwork,
       maxAmountRequired: priceConversion.maxAmountRequired,
-      resource: '',
+      resource: 'https://agent.bylana-ai.com/api/agent/generate-x402',
       description: 'Create an AI image generation job',
       mimeType: 'application/json',
       payTo: this.x402PayToAddress,
@@ -135,7 +135,6 @@ class PaymentService {
     }
 
     const decodedPayment = decodePayment(paymentHeader);
-    console.log('decodedPayment', decodedPayment);
     const requirements = await this.preparePayment();
     
     const selectedRequirement = findMatchingPaymentRequirements(
@@ -166,6 +165,7 @@ class PaymentService {
     );
     
     if (!settlement?.success) {
+      console.log('failed settlement:', settlement);
       throw new Error(
         settlement?.errorReason || 'Unable to settle payment. Please try again.'
       );
@@ -181,6 +181,108 @@ class PaymentService {
         raw: settlement
       }
     };
+  }
+
+  async verifyPayment(paymentHeader) {
+    if (!this.isEnabled()) {
+      throw new Error('x402 payments are currently disabled.');
+    }
+
+    if (!paymentHeader) {
+      throw new Error('paymentHeader is required for settlement');
+    }
+
+    const decodedPayment = decodePayment(paymentHeader);
+    const requirements = await this.preparePayment();
+    
+    const selectedRequirement = findMatchingPaymentRequirements(
+      requirements,
+      decodedPayment
+    );
+
+    if (!selectedRequirement) {
+      throw new Error('Provided payment does not match the required configuration.');
+    }
+
+    // Verify payment
+    const verification = await this.facilitatorClient.verify(
+      decodedPayment,
+      selectedRequirement
+    );
+    
+    if (!verification?.isValid) {
+      throw new Error(
+        verification?.invalidReason || 'Payment verification failed. Please retry.'
+      );
+    }
+
+    return {
+      success: true,
+      step: 'verify',
+      verification: verification
+    };
+  }
+
+  async settleOnlyPayment(paymentHeader) {
+    if (!this.isEnabled()) {
+      throw new Error('x402 payments are currently disabled.');
+    }
+
+    if (!paymentHeader) {
+      throw new Error('paymentHeader is required for settlement');
+    }
+
+    const decodedPayment = decodePayment(paymentHeader);
+    const requirements = await this.preparePayment();
+    
+    const selectedRequirement = findMatchingPaymentRequirements(
+      requirements,
+      decodedPayment
+    );
+
+    if (!selectedRequirement) {
+      console.log('provided payment does not match the required configuration:', decodedPayment);
+      throw new Error('Provided payment does not match the required configuration.');
+    }
+
+    try {
+      // Settle payment
+      const settlement = await this.facilitatorClient.settle(
+        decodedPayment,
+        selectedRequirement
+      );
+  
+      if (!settlement?.success) {
+        console.log('[Payment Service] failed settlement:', {
+          settlement,
+          decodedPayment,
+          selectedRequirement
+        });
+        throw new Error(
+          settlement?.errorReason || 'Unable to settle payment. Please try again.'
+        );
+      }
+  
+      return {
+        success: true,
+        step: 'settle',
+        settlement: {
+          transaction: settlement.transaction,
+          network: settlement.network || decodedPayment.network,
+          payer: settlement.payer || null,
+          raw: settlement
+        }
+      };
+    } catch (error) {
+      console.error('[Payment Service] Error during facilitatorClient.settle:', {
+        message: error.message,
+        stack: error.stack,
+        decodedPayment,
+        selectedRequirement
+      });
+      // Re-throw so the caller still sees the failure
+      throw error;
+    }
   }
 
   /**

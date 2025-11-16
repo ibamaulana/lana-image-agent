@@ -182,14 +182,22 @@ router.post('/generate', async (req, res) => {
         imageUrl: result.imageUrl,
         metadata: result.metadata,
         reasoning: result.reasoning,
+        refinedData: result.refinedData,
+        safetyCheck: result.safetyCheck,
+        phaseTimings: result.phaseTimings,
         workflow: {
           toolCalls: result.toolCalls
         }
       });
     } else {
-      res.status(500).json({
+      // Check if it's a content policy violation
+      const statusCode = result.safetyCheck?.safe === false ? 400 : 500;
+      
+      res.status(statusCode).json({
         success: false,
         error: result.error || 'Image generation failed',
+        safetyCheck: result.safetyCheck,
+        phaseTimings: result.phaseTimings,
         reasoning: result.reasoning,
         workflow: {
           toolCalls: result.toolCalls
@@ -245,6 +253,17 @@ router.post('/generate-x402', async (req, res) => {
     // start when request header X-PAYMENT is present
     let paymentMetadata = null;
     if (req.headers['x-payment']) {
+      const paymentHeader = req.headers['x-payment'];
+      // verify payment first
+      const paymentResponse = await paymentService.verifyPayment(paymentHeader);
+      if (!paymentResponse.success) {
+        return res.status(400).json({
+          success: false,
+          error: paymentResponse.error || 'Payment failed'
+        });
+      }
+      console.log('payment verified:', paymentResponse);
+
       if (startWebhookUrl) {
         console.log('trigger startwebhook on url:', startWebhookUrl);
         fetch(startWebhookUrl, {
@@ -268,8 +287,8 @@ router.post('/generate-x402', async (req, res) => {
 
       if (result.success) {
         // settle payment
-        const paymentHeader = req.headers['x-payment'];
-        const paymentResponse = await paymentService.settlePayment(paymentHeader);
+        const paymentResponse = await paymentService.settleOnlyPayment(paymentHeader);
+        console.log('payment settled:', paymentResponse);
         if (!paymentResponse.success) {
           return res.status(400).json({
             success: false,
@@ -298,6 +317,9 @@ router.post('/generate-x402', async (req, res) => {
             payment: paymentMetadata
           },
           reasoning: result.reasoning,
+          refinedData: result.refinedData,
+          safetyCheck: result.safetyCheck,
+          phaseTimings: result.phaseTimings,
           workflow: {
             toolCalls: result.toolCalls
           }
@@ -312,13 +334,20 @@ router.post('/generate-x402', async (req, res) => {
             },
             body: JSON.stringify({
               error: result.error || 'Image generation failed',
-              reasoning: result.reasoning
+              reasoning: result.reasoning,
+              safetyCheck: result.safetyCheck
             })
           });
         }
-        res.status(500).json({
+        
+        // Check if it's a content policy violation
+        const statusCode = result.safetyCheck?.safe === false ? 400 : 500;
+        
+        res.status(statusCode).json({
           success: false,
           error: result.error || 'Image generation failed',
+          safetyCheck: result.safetyCheck,
+          phaseTimings: result.phaseTimings,
           reasoning: result.reasoning,
           workflow: {
             toolCalls: result.toolCalls
