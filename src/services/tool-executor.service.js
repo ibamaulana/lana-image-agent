@@ -4,39 +4,87 @@
  */
 const imageGenerationService = require('./image-generation.service');
 const replicateModelsService = require('./replicate-models.service');
+const modelFilterService = require('./model-filter.service');
 
 /**
  * Execute list-models tool
  * @param {Object} params
- * @param {number} params.referenceImageCount - Optional filter by reference image count
+ * @param {number} params.referenceImageCount - Optional filter by reference image count (legacy)
+ * @param {Object} params.modelRequirements - Model requirements from Phase 1 (new, preferred)
  */
-async function executeListModels({ referenceImageCount } = {}) {
+async function executeListModels({ referenceImageCount, modelRequirements } = {}) {
   try {
-    const models = await replicateModelsService.getImageModels({ referenceImageCount });
+    let models;
+    
+    // Use new filtering system if modelRequirements provided
+    if (modelRequirements && Object.keys(modelRequirements).length > 0) {
+      console.log('[Tool Executor] Using model requirements filtering:', modelRequirements);
+      models = modelFilterService.filterAndScoreModels(modelRequirements, 5);
+      
+      // If no models found, fall back to basic filtering
+      if (models.length === 0) {
+        console.warn('[Tool Executor] No models matched requirements, falling back to basic filter');
+        const fallbackCount = modelRequirements.needsReferenceImages ? 
+          (referenceImageCount || 1) : undefined;
+        models = await replicateModelsService.getImageModels({ 
+          referenceImageCount: fallbackCount 
+        });
+      }
+    } else {
+      // Legacy path: use basic filtering
+      models = await replicateModelsService.getImageModels({ referenceImageCount });
+    }
 
     return {
       success: true,
-      models: models.map((model) => ({
-        id: model.id,
-        name: model.name,
-        description: model.description || '',
-        owner: model.owner,
-        fullName: model.fullName,
-        aspectRatios: Object.keys(model.aspectRatios || {}),
-        runCount: model.runCount || 0,
-        tags: model.tags || [],
-        isOfficial: model.isOfficial || false,
-        url: model.url || null,
-        capabilities: model.capabilities || {
-          supportsSingleReference: false,
-          supportsMultipleReferences: false,
-          supportsImageToImage: false
-        },
-        strengths: model.strengths || [],
-        // NEW: Expose input schema for LLM to make intelligent decisions
-        inputSchema: model.inputSchema || {}
-      })),
-      total: models.length
+      models: models.map((model) => {
+        // Handle both old format (from API) and new format (from summaries)
+        const isSummaryFormat = model.summary !== undefined;
+        
+        const baseModel = {
+          id: model.id,
+          name: model.name,
+          owner: model.owner,
+          fullName: model.fullName,
+          runCount: model.runCount || 0,
+          isOfficial: model.isOfficial !== false,
+          url: model.url || null,
+          inputSchema: model.inputSchema || {}
+        };
+        
+        // Add description (from summary or old format)
+        if (isSummaryFormat) {
+          baseModel.description = model.summary?.oneLinePitch || '';
+          baseModel.capabilities = model.capabilities || {};
+          baseModel.strengths = model.summary?.styleStrengths || [];
+          baseModel.aspectRatios = model.capabilities?.supportedAspectRatios || [];
+          baseModel.tags = model.tags || [];
+          
+          // Add rich summary information for LLM decision-making
+          baseModel.summary = {
+            oneLinePitch: model.summary.oneLinePitch,
+            bestFor: model.summary.bestFor || [],
+            styleStrengths: model.summary.styleStrengths || [],
+            qualityProfile: model.summary.qualityProfile || {},
+            typicalUseCase: model.summary.typicalUseCase
+          };
+        } else {
+          // Old format
+          baseModel.description = model.description || '';
+          baseModel.aspectRatios = Object.keys(model.aspectRatios || {});
+          baseModel.tags = model.tags || [];
+          baseModel.capabilities = model.capabilities || {
+            supportsSingleReference: false,
+            supportsMultipleReferences: false,
+            supportsImageToImage: false
+          };
+          baseModel.strengths = model.strengths || [];
+        }
+        
+        return baseModel;
+      }),
+      total: models.length,
+      filtered: modelRequirements ? true : false
     };
   } catch (error) {
     throw new Error(error.message || 'Failed to list models');

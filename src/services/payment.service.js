@@ -12,6 +12,7 @@ const { createKeyPairSignerFromBytes } = require('@solana/kit');
 const { Keypair, Connection } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const { config } = require('../config/env.config');
+const { settleResponseHeader } = require('x402/types');
 
 class PaymentService {
   constructor() {
@@ -183,7 +184,7 @@ class PaymentService {
     };
   }
 
-  async verifyPayment(paymentHeader) {
+  async verifyPayment(paymentHeader, requirements) {
     if (!this.isEnabled()) {
       throw new Error('x402 payments are currently disabled.');
     }
@@ -193,7 +194,6 @@ class PaymentService {
     }
 
     const decodedPayment = decodePayment(paymentHeader);
-    const requirements = await this.preparePayment();
     
     const selectedRequirement = findMatchingPaymentRequirements(
       requirements,
@@ -223,7 +223,7 @@ class PaymentService {
     };
   }
 
-  async settleOnlyPayment(paymentHeader) {
+  async settleOnlyPayment(paymentHeader, requirements) {
     if (!this.isEnabled()) {
       throw new Error('x402 payments are currently disabled.');
     }
@@ -233,7 +233,6 @@ class PaymentService {
     }
 
     const decodedPayment = decodePayment(paymentHeader);
-    const requirements = await this.preparePayment();
     
     const selectedRequirement = findMatchingPaymentRequirements(
       requirements,
@@ -251,6 +250,11 @@ class PaymentService {
         decodedPayment,
         selectedRequirement
       );
+
+      const responseHeader = settleResponseHeader(settlement);
+      // In a real application, you would store this response header
+      // and associate it with the payment for later verification
+      console.log("Payment settled:", responseHeader);
   
       if (!settlement?.success) {
         console.log('[Payment Service] failed settlement:', {
@@ -280,8 +284,11 @@ class PaymentService {
         decodedPayment,
         selectedRequirement
       });
-      // Re-throw so the caller still sees the failure
-      throw error;
+      return {
+        success: false,
+        step: 'settle',
+        error: error.message
+      };
     }
   }
 

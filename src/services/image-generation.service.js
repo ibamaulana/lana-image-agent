@@ -43,8 +43,43 @@ class ImageGenerationService {
 
   async getDimensions(modelId, aspectRatio) {
     const model = await this.getModelConfig(modelId);
-    const dimensions = model.aspectRatios[aspectRatio] || model.aspectRatios['1:1'];
-    return dimensions;
+    
+    // Handle old format: aspectRatios is an object with {width, height}
+    if (model.aspectRatios && typeof model.aspectRatios === 'object' && !Array.isArray(model.aspectRatios)) {
+      const dimensions = model.aspectRatios[aspectRatio] || model.aspectRatios['1:1'];
+      if (dimensions && dimensions.width && dimensions.height) {
+        return dimensions;
+      }
+    }
+    
+    // Handle new format: calculate from aspect ratio string
+    // Or calculate from aspect ratio if not in old format
+    return this.calculateDimensionsFromAspectRatio(aspectRatio);
+  }
+  
+  /**
+   * Calculate dimensions from aspect ratio string
+   */
+  calculateDimensionsFromAspectRatio(aspectRatio) {
+    const [w, h] = aspectRatio.split(':').map(Number);
+    const baseSize = 1024;
+    
+    if (w > h) {
+      return {
+        width: baseSize,
+        height: Math.round(baseSize * (h / w))
+      };
+    } else if (h > w) {
+      return {
+        width: Math.round(baseSize * (w / h)),
+        height: baseSize
+      };
+    } else {
+      return {
+        width: baseSize,
+        height: baseSize
+      };
+    }
   }
 
   async generateImage(modelId, prompt, metadata = {}) {

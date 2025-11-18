@@ -255,8 +255,10 @@ router.post('/generate-x402', async (req, res) => {
     let paymentMetadata = null;
     if (req.headers['x-payment']) {
       const paymentHeader = req.headers['x-payment'];
+      // prepare payment
+      const paymentRequirements = await paymentService.preparePayment();
       // verify payment first
-      const paymentResponse = await paymentService.verifyPayment(paymentHeader);
+      const paymentResponse = await paymentService.verifyPayment(paymentHeader, paymentRequirements);
       if (!paymentResponse.success) {
         return res.status(400).json({
           success: false,
@@ -288,16 +290,6 @@ router.post('/generate-x402', async (req, res) => {
       });
 
       if (result.success) {
-        // settle payment
-        const paymentResponse = await paymentService.settleOnlyPayment(paymentHeader);
-        console.log('payment settled:', paymentResponse);
-        if (!paymentResponse.success) {
-          return res.status(400).json({
-            success: false,
-            error: paymentResponse.error || 'Payment failed'
-          });
-        }
-        paymentMetadata = paymentResponse.settlement;
         if(successWebhookUrl){
           console.log('trigger successwebhook on url:', successWebhookUrl);
           fetch(successWebhookUrl, {
@@ -326,6 +318,27 @@ router.post('/generate-x402', async (req, res) => {
             toolCalls: result.toolCalls
           }
         });
+
+        // settle payment
+        const paymentResponse = await paymentService.settleOnlyPayment(paymentHeader, paymentRequirements);
+        if (!paymentResponse.success) {
+          console.error('[Agent API] Payment settlement failed:', paymentResponse.error);
+        }
+        paymentMetadata = paymentResponse.settlement;
+
+        if(successWebhookUrl){
+          console.log('trigger successwebhook on url:', successWebhookUrl);
+          fetch(successWebhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              result: result,
+              paymentMetadata: paymentMetadata
+            })
+          });
+        }
       } else {
         if(failureWebhookUrl){
           console.log('trigger failurewebhook on url:', failureWebhookUrl);

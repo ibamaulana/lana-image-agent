@@ -33,13 +33,25 @@ function getToolDefinitions() {
         {
           name: 'list_models',
           description:
-            'List available image generation models with their capabilities and strengths. Filter by reference image support if needed.',
+            'List available image generation models with their capabilities and strengths. Models are pre-filtered based on requirements, so you get the best matches.',
           parameters: {
             type: 'object',
             properties: {
               referenceImageCount: {
                 type: 'number',
-                description: 'Optional filter: 0 for text-to-image only, 1 for single reference support, >1 for multiple reference support'
+                description: 'Optional filter: 0 for text-to-image only, 1 for single reference support, >1 for multiple reference support (legacy, use modelRequirements instead)'
+              },
+              modelRequirements: {
+                type: 'object',
+                description: 'Model requirements from refined prompt (preferred method)',
+                properties: {
+                  needsReferenceImages: { type: 'boolean' },
+                  minQuality: { type: 'string' },
+                  styleFocus: { type: 'array', items: { type: 'string' } },
+                  speedPreference: { type: 'string' },
+                  preferredModel: { type: 'string' },
+                  aspectRatio: { type: 'string' }
+                }
               }
             }
           }
@@ -654,6 +666,12 @@ async function refinePromptWithGemini({
 
 Your job is to analyze the user's request (text + any reference images) and output a structured JSON response.
 
+**DETECT MODEL PREFERENCE:**
+- Check if the user explicitly mentions a specific model name in their request
+- Examples: "use flux", "with seedream", "stable diffusion", "SDXL", "flux-dev", "flux-schnell"
+- If detected, extract the model name/keyword and include it in preferred_model
+- If no specific model mentioned, leave preferred_model as null or empty
+
 **If reference images are provided:**
 - Mode: "image_to_image"
 - EXAMINE the reference images to understand what the user is working with
@@ -670,11 +688,36 @@ Your job is to analyze the user's request (text + any reference images) and outp
 {
   "mode": "text_to_image" or "image_to_image",
   "title": "Creative 3-8 word title for the image",
-  "refined_prompt": "The refined prompt string",
+  "refined_prompt": "The refined prompt string (remove model name if mentioned)",
   "aspect_ratio": "1:1" | "16:9" | "9:16" | "4:5",
   "style": "photorealistic" | "anime" | "artistic" | "digital-art" | "fantasy" | "cinematic" | etc.,
-  "referenceImages": ["url1", "url2"]
+  "preferred_model": "model name/keyword if user specified, otherwise null",
+  "referenceImages": ["url1", "url2"],
+  "modelRequirements": {
+    "needsReferenceImages": true or false,
+    "minQuality": "low" | "moderate" | "good" | "very-good" | "excellent",
+    "styleFocus": ["photorealistic", "anime", etc.],
+    "speedPreference": "fast" | "no" | null,
+    "useCase": "brief description of use case if clear",
+    "specialNeeds": ["handles faces well", "good at hands", etc.]
+  }
 }
+
+**Model Requirements Guidelines:**
+- needsReferenceImages: true if reference images provided, false otherwise
+- minQuality: Infer from user language:
+  * "high quality", "detailed", "professional", "best" → "excellent"
+  * "good quality", "nice" → "very-good"
+  * "quick", "fast", "simple" → "good" or "moderate"
+  * Default: "good"
+- styleFocus: Array of style keywords matching the "style" field
+- speedPreference: "fast" if user emphasizes speed/quick, "no" if quality is priority, null otherwise
+- useCase: Brief description if clear (e.g., "portrait generation", "product photography", "concept art")
+- specialNeeds: Array of specific requirements mentioned:
+  * "faces", "portrait", "people" → ["handles faces well"]
+  * "hands" → ["good at hands"]
+  * "text", "words" → ["handles text well"]
+  * "consistency" → ["maintains consistency"]
 
 **Aspect Ratio Guidelines:**
 - If reference images provided: analyze their aspect ratio and match it
@@ -695,6 +738,11 @@ Infer from user's language, intent, and reference images:
 **Title Creation:**
 - With reference images: Focus on transformation (e.g., "Anime Style Transformation", "Dramatic Cinematic Rendering")
 - Without reference images: Describe the scene (e.g., "Majestic Horse at Golden Sunrise")
+
+**Important about preferred_model:**
+- Extract model keywords like: "flux", "seedream", "stable-diffusion", "sdxl", "flux-dev", "flux-schnell", etc.
+- Remove the model reference from refined_prompt - don't include "use flux" in the actual image prompt
+- Be flexible with variations: "flux dev" → "flux-dev", "stable diffusion" → "stable-diffusion"
 
 Output ONLY valid JSON, no other text.`;
 
@@ -743,7 +791,39 @@ Output ONLY valid JSON, no other text.`;
     // Ensure referenceImages array is included
     refinedData.referenceImages = referenceImages;
     
+    // Ensure modelRequirements has defaults
+    if (!refinedData.modelRequirements) {
+      refinedData.modelRequirements = {};
+    }
+    
+    // Set needsReferenceImages based on actual reference images
+    refinedData.modelRequirements.needsReferenceImages = referenceImages.length > 0;
+    
+    // Ensure styleFocus includes the style
+    if (!refinedData.modelRequirements.styleFocus) {
+      refinedData.modelRequirements.styleFocus = [];
+    }
+    if (refinedData.style && !refinedData.modelRequirements.styleFocus.includes(refinedData.style)) {
+      refinedData.modelRequirements.styleFocus.push(refinedData.style);
+    }
+    
+    // Set default minQuality if not specified
+    if (!refinedData.modelRequirements.minQuality) {
+      refinedData.modelRequirements.minQuality = 'good';
+    }
+    
+    // Add preferred_model to modelRequirements if specified
+    if (refinedData.preferred_model) {
+      refinedData.modelRequirements.preferredModel = refinedData.preferred_model;
+    }
+    
+    // Add aspectRatio to modelRequirements
+    if (refinedData.aspect_ratio) {
+      refinedData.modelRequirements.aspectRatio = refinedData.aspect_ratio;
+    }
+    
     console.log('[Phase 1 - Refiner] Output:', refinedData);
+    console.log('[Phase 1 - Refiner] Model Requirements:', refinedData.modelRequirements);
     
     return refinedData;
   } catch (error) {
@@ -769,16 +849,18 @@ async function generateImageWithAgent({
 You receive a refined prompt specification and must execute EXACTLY this workflow:
 
 1. **Call list_models ONCE** to get available models
-   - Use referenceImageCount parameter based on the mode:
-     * image_to_image with 1 reference: referenceImageCount=1
-     * image_to_image with 2+ references: referenceImageCount=2
-     * text_to_image: no referenceImageCount parameter
+   - **IMPORTANT**: Pass the modelRequirements from the input specification
+   - The models will be pre-filtered and scored based on these requirements
+   - You'll receive the top 3-5 best matching models
+   - Example: list_models({ modelRequirements: { needsReferenceImages: true, minQuality: "excellent", styleFocus: ["photorealistic"], preferredModel: "flux-dev" } })
 
-2. **Analyze the inputSchema** and select THE BEST model (only one)
-   - For image_to_image: find models with isImageInput parameters, exclude models with mask parameters
-   - Match model strengths to the style requirement
-   - Consider popularity (runCount)
-   - Prefer models with good quality and appropriate capabilities
+2. **Select THE BEST model from the filtered list** (only one)
+   - Models are already filtered and ranked by relevance
+   - Read the summary.oneLinePitch and summary.bestFor for each model
+   - Check summary.qualityProfile to understand speed/quality trade-offs
+   - If user specified a preferred_model, prioritize it if it appears in the list
+   - Consider the summary.typicalUseCase to see if it matches the user's intent
+   - Select the model that best matches the refined_prompt requirements
 
 3. **Call generate_image ONCE** with your selected model:
    - Your selected modelId (only the best one)
@@ -787,8 +869,9 @@ You receive a refined prompt specification and must execute EXACTLY this workflo
    - Add appropriate negativePrompt: "blurry, low quality, distorted, ugly, bad anatomy, watermark, text"
 
 IMPORTANT: 
-- Call list_models ONCE
-- Select ONE best model
+- Call list_models ONCE with modelRequirements
+- The models are pre-filtered - trust the filtering and pick from the provided list
+- Select ONE best model from the filtered results
 - Call generate_image ONCE
 - STOP after successful generation - do not try other models`;
 
@@ -845,7 +928,13 @@ IMPORTANT:
       for (const part of functionCalls) {
         const functionCall = part.functionCall;
         const toolName = functionCall.name.replace(/_/g, '-');
-        const toolArgs = { ...functionCall.args, userId };
+        let toolArgs = { ...functionCall.args, userId };
+        
+        // Auto-inject modelRequirements for list_models if not provided by LLM
+        if (toolName === 'list-models' && refinedData.modelRequirements && !toolArgs.modelRequirements) {
+          toolArgs.modelRequirements = refinedData.modelRequirements;
+          console.log('[Phase 2 - Agent] Auto-injected modelRequirements for list_models');
+        }
 
         console.log('[Phase 2 - Agent] Executing tool:', toolName);
 

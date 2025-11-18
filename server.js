@@ -164,6 +164,10 @@ if (config.features.orchestratorEnabled) {
   console.warn('⚠️  Gemini orchestrator disabled (set GEMINI_API_KEY to enable)');
 }
 
+// Models routes (for fetching and caching model data)
+app.use('/api/models', require('./src/routes/models.routes'));
+console.log('✅ Models API enabled');
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
@@ -268,6 +272,12 @@ const startServer = async () => {
       console.log('      POST /api/agent/generate - LLM-orchestrated image generation');
       console.log('      GET  /api/agent/status - Check orchestrator status');
     }
+    
+    console.log('\n   Models API:');
+    console.log('      GET /api/models/status - Check cached model data status');
+    console.log('      GET /api/models/fetch-source - Fetch models + READMEs (slow, run periodically)');
+    console.log('      GET /api/models/generate-summaries - Generate LLM summaries from source');
+    console.log('      GET /api/models/list - List models from cache');
   });
 };
 

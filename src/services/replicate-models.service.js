@@ -5,6 +5,8 @@
 
 const Replicate = require('replicate');
 const { config } = require('../config/env.config');
+const fs = require('fs');
+const path = require('path');
 
 class ReplicateModelsService {
   constructor() {
@@ -453,13 +455,47 @@ class ReplicateModelsService {
   }
 
   /**
+   * Load models from cached summaries file
+   */
+  loadModelsFromSummaries() {
+    const summariesPath = path.join(__dirname, '../../storage/model-summaries.json');
+    
+    if (!fs.existsSync(summariesPath)) {
+      return null;
+    }
+    
+    try {
+      const data = JSON.parse(fs.readFileSync(summariesPath, 'utf-8'));
+      console.log(`📦 Loaded ${data.models.length} models from summaries cache`);
+      return data.models;
+    } catch (error) {
+      console.warn('⚠️  Failed to load summaries cache:', error.message);
+      return null;
+    }
+  }
+
+  /**
    * Get all image generation models (cached)
    * @param {Object} options - Filter options
    * @param {number} options.referenceImageCount - Filter by reference image support (0, 1, or >1)
+   * @param {boolean} options.useSummaries - Use cached summaries if available (default: true)
    */
   async getImageModels(options = {}) {
-    // Get all models (cached or fresh)
+    const useSummaries = options.useSummaries !== false;
     let models;
+    
+    // Try to load from summaries cache first (if enabled)
+    if (useSummaries) {
+      models = this.loadModelsFromSummaries();
+      
+      if (models) {
+        console.log('📦 Using model summaries cache');
+        // Apply filters and return
+        return this.filterModels(models, options);
+      }
+      
+      console.log('⚠️  Summaries cache not found, falling back to API fetch');
+    }
     
     // Return cached models if valid
     if (this.isCacheValid()) {
@@ -484,7 +520,13 @@ class ReplicateModelsService {
       }
     }
 
-    // Apply filters if specified
+    return this.filterModels(models, options);
+  }
+  
+  /**
+   * Apply filters to models list
+   */
+  filterModels(models, options = {}) {
     if (options.referenceImageCount !== undefined) {
       const count = options.referenceImageCount;
       
@@ -493,7 +535,11 @@ class ReplicateModelsService {
         return models;
       } else if (count === 1) {
         // Filter to models that support at least single reference
-        models = models.filter(m => m.capabilities.supportsSingleReference);
+        models = models.filter(m => {
+          // Handle both old format and new summaries format
+          const caps = m.capabilities;
+          return caps.supportsSingleReference || caps.supportsReferenceImages;
+        });
         console.log(`🔍 Filtered to ${models.length} models supporting single reference image`);
       } else if (count > 1) {
         // Filter to models that support multiple references
