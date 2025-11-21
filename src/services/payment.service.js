@@ -87,7 +87,7 @@ class PaymentService {
     }
 
     const targetNetwork = 'solana';
-    const priceConversion = processPriceToAtomicAmount(0.06, targetNetwork);
+    const priceConversion = processPriceToAtomicAmount(0.01, targetNetwork);
     
     if (priceConversion.error) {
       throw new Error(priceConversion.error);

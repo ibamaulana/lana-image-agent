@@ -3,9 +3,54 @@
  * Lightweight conversational layer for the simplified image workflow
  */
 
+const fs = require('fs');
+const path = require('path');
+const esbuild = require('esbuild');
 const { GoogleGenAI } = require('@google/genai');
 const { executeTool } = require('./tool-executor.service');
 const { config } = require('../config/env.config');
+const z = require('zod');
+
+const gxaiCacheDir = path.join(__dirname, '..', '..', '.cache');
+const gxaiBundlePath = path.join(gxaiCacheDir, 'gxai-agent.cjs');
+let gxaiModule = null;
+
+function getGxaiModule() {
+  if (gxaiModule) {
+    return gxaiModule;
+  }
+
+  const entryPath = require.resolve('gxai/main.ts');
+  const needsBuild =
+    !fs.existsSync(gxaiBundlePath) ||
+    fs.statSync(gxaiBundlePath).mtimeMs < fs.statSync(entryPath).mtimeMs;
+
+  if (needsBuild) {
+    fs.mkdirSync(gxaiCacheDir, { recursive: true });
+    try {
+      esbuild.buildSync({
+        entryPoints: [entryPath],
+        outfile: gxaiBundlePath,
+        bundle: true,
+        platform: 'node',
+        format: 'cjs',
+        target: 'node18',
+        logLevel: 'warning',
+        sourcemap: false,
+      });
+    } catch (error) {
+      console.error('[GXAI] Failed to bundle gxai/main.ts with esbuild', error);
+      throw new Error(
+        'Unable to compile gxai runtime dependency. Ensure esbuild is installed (npm install esbuild) and retry.'
+      );
+    }
+  }
+
+  gxaiModule = require(gxaiBundlePath);
+  return gxaiModule;
+}
+
+const { Agent } = getGxaiModule();
 
 let geminiClient = null;
 
@@ -677,7 +722,6 @@ Your job is to analyze the user's request (text + any reference images) and outp
 - EXAMINE the reference images to understand what the user is working with
 - Keep refined_prompt MINIMAL and GENERAL - the reference defines the subject
 - Focus on the transformation/style the user wants
-- Example: User says "make this anime style" + shows photo → refined_prompt: "anime style transformation, vibrant colors, clean lines, detailed illustration"
 
 **If NO reference images (text-to-image):**
 - Mode: "text_to_image"
@@ -759,7 +803,7 @@ Output ONLY valid JSON, no other text.`;
     const parts = await buildMultimodalParts(userMessage, referenceImages);
 
     const response = await ai.models.generateContent({
-      model: "gemini-flash-latest",
+      model: "gemini-2.5-flash",
       contents: [{
         role: 'user',
         parts
@@ -1140,8 +1184,145 @@ async function generateWithGeminiOrchestrator({
   }
 }
 
+async function generateWithGeminiOrchestratorGx({
+  userId,
+  prompt,
+  referenceImages = [],
+  state = {}
+}) {
+  try {
+    const startTime = Date.now();
+    console.log('[Orchestrator] ========== Starting Three-Phase Generation ==========');
+    console.log('[Orchestrator] User:', userId);
+    console.log('[Orchestrator] Prompt:', prompt.substring(0, 100));
+    
+    // Normalize reference images
+    let normalizedReferences = [];
+    if (referenceImages) {
+      if (Array.isArray(referenceImages)) {
+        normalizedReferences = referenceImages.filter(ref => 
+          typeof ref === 'string' && ref.trim().length > 0
+        );
+      } else if (typeof referenceImages === 'string' && referenceImages.trim().length > 0) {
+        normalizedReferences = [referenceImages.trim()];
+      }
+    }
+    
+    console.log('[Orchestrator] Reference Images:', normalizedReferences.length);
+
+    // ===== PHASE 0: Content Safety Check =====
+    console.log('[Phase 0] Starting content safety check...');
+    const phaseZeroStart = Date.now();
+
+    const safetyAgent = new Agent({
+      llm: 'o4-mini-2025-04-16', // Your LLM model (e.g., OpenAI GPT variant)
+      inputFormat: z.object({
+        prompt: z.string(),
+        referenceImages: z.array(z.string()),
+      }),
+      outputFormat: z.object({
+        safe: z.boolean(),
+        reason: z.string(),
+        category: z.enum(['nsfw', 'child_safety', 'violence', 'illegal', 'safe']),
+        confidence: z.number().min(0).max(1),
+      }),
+      temperature: 0.7, // Optional: Controls creativity (0-1)
+    });
+
+    const safetyResultGx = await safetyAgent.run({
+      prompt,
+      referenceImages: normalizedReferences
+    });
+
+    console.log('[Phase 0] Result:', safetyResultGx);
+    
+    const safetyResult = await checkContentSafety({
+      prompt,
+      referenceImages: normalizedReferences
+    });
+    
+    const phaseZeroDuration = Date.now() - phaseZeroStart;
+    console.log('[Phase 0] Completed in', phaseZeroDuration, 'ms');
+    console.log('[Phase 0] Result:', safetyResult.safe ? 'SAFE' : 'UNSAFE -', safetyResult.category);
+
+    // If content is not safe, return error immediately
+    if (!safetyResult.safe) {
+      console.warn('[Phase 0] Content flagged as', safetyResult.category);
+      return {
+        success: false,
+        error: 'Content policy violation',
+        safetyCheck: {
+          safe: false,
+          reason: safetyResult.reason,
+          category: safetyResult.category,
+          message: getSafetyErrorMessage(safetyResult.category),
+          confidence: safetyResult.confidence
+        },
+        phaseTimings: {
+          safety: phaseZeroDuration,
+          total: Date.now() - startTime
+        }
+      };
+    }
+
+    console.log('[Phase 0] ✓ Content approved, proceeding to refinement');
+
+    // ===== PHASE 1: Prompt Refinement =====
+    console.log('[Phase 1] Starting prompt refinement...');
+    const phaseOneStart = Date.now();
+    
+    const refinedData = await refinePromptWithGemini({
+      userId,
+      prompt,
+      referenceImages: normalizedReferences
+    });
+    
+    const phaseOneDuration = Date.now() - phaseOneStart;
+    console.log('[Phase 1] Completed in', phaseOneDuration, 'ms');
+    console.log('[Phase 1] Mode:', refinedData.mode);
+    console.log('[Phase 1] Title:', refinedData.title);
+    console.log('[Phase 1] Style:', refinedData.style);
+
+    // ===== PHASE 2: Image Generation =====
+    console.log('[Phase 2] Starting image generation...');
+    const phaseTwoStart = Date.now();
+    
+    const result = await generateImageWithAgent({
+      userId,
+      refinedData,
+      state
+    });
+    
+    const phaseTwoDuration = Date.now() - phaseTwoStart;
+    console.log('[Phase 2] Completed in', phaseTwoDuration, 'ms');
+
+    const totalDuration = Date.now() - startTime;
+    console.log('[Orchestrator] ========== Total Time:', totalDuration, 'ms ==========');
+    
+    // Add safety check and timing info to successful response
+    return {
+      ...result,
+      safetyCheck: {
+        safe: true,
+        category: 'safe',
+        confidence: safetyResult.confidence
+      },
+      phaseTimings: {
+        safety: phaseZeroDuration,
+        refinement: phaseOneDuration,
+        generation: phaseTwoDuration,
+        total: totalDuration
+      }
+    };
+  } catch (error) {
+    console.error('[Orchestrator] Generation error:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   streamGeminiOrchestrator,
+  generateWithGeminiOrchestratorGx,
   generateWithGeminiOrchestrator,
   getToolDefinitions,
   checkContentSafety,

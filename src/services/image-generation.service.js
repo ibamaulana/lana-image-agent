@@ -115,12 +115,27 @@ class ImageGenerationService {
 
       // Add reference images if model supports them
       if (referenceImages.length > 0) {
-        if (referenceImages.length === 1) {
-          // Single reference image
+        // Check for image input parameters by exact name (not isImageInput flag)
+        // Models use either "image" (string) or "image_input" (array)
+        const imageParam = model.inputSchema?.image;
+        const imageInputParam = model.inputSchema?.image_input;
+        
+        if (imageInputParam) {
+          // Model uses image_input (array) - supports single or multiple images
+          inputParams.image_input = referenceImages;
+          console.log(`   Using image_input parameter (array)`);
+        } else if (imageParam) {
+          // Model uses image (string) - single image only
+          if (referenceImages.length > 1) {
+            throw new Error(
+              `Model "${model.name}" only accepts single reference image via "image" parameter, ` +
+              `but ${referenceImages.length} images were provided.`
+            );
+          }
           inputParams.image = referenceImages[0];
+          console.log(`   Using image parameter (string)`);
         } else {
-          // Multiple reference images
-          inputParams.images = referenceImages;
+          console.warn(`⚠️  Model "${model.name}" has reference images but no "image" or "image_input" parameter found in schema`);
         }
       }
 

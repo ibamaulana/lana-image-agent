@@ -6,7 +6,7 @@
 const express = require('express');
 const { randomUUID } = require('crypto');
 const router = express.Router();
-const { streamGeminiOrchestrator, generateWithGeminiOrchestrator } = require('../services/orchestrator.service');
+const { streamGeminiOrchestrator, generateWithGeminiOrchestrator,generateWithGeminiOrchestratorGx } = require('../services/orchestrator.service');
 const storage = require('../storage'); // Auto-selects PostgreSQL or memory
 const { executeTool } = require('../services/tool-executor.service');
 const { settleResponseFromHeader } = require('x402/types');
@@ -127,19 +127,7 @@ router.post('/generate', async (req, res) => {
       userId,
       prompt,
       referenceImages,
-      preferredModelId,
-      aspectRatio,
-      style,
-      extraParams
     } = req.body || {};
-
-    // Validate userId
-    if (!userId || typeof userId !== 'string') {
-      return res.status(400).json({
-        success: false,
-        error: 'userId is required'
-      });
-    }
 
     // Validate prompt
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
@@ -149,32 +137,12 @@ router.post('/generate', async (req, res) => {
       });
     }
 
-    // Ensure user exists
-    let user = await storage.getUser(userId);
-    if (!user) {
-      const placeholderWallet = `placeholder-${userId}-${randomUUID()}`;
-      user = await storage.createUser({
-        id: userId,
-        username: userId,
-        wallet_address: placeholderWallet,
-        wallet_private_key: `placeholder-key-${randomUUID()}`,
-        balance: 0
-      });
-
-      console.log('[Agent API] Created new user profile for /generate:', userId);
-    }
-
     // Use Gemini orchestrator for intelligent generation
-    const result = await generateWithGeminiOrchestrator({
-      userId: user.id,
+    const result = await generateWithGeminiOrchestratorGx({
+      userId: null,
       prompt: prompt.trim(),
       referenceImages: referenceImages || [],
-      state: {
-        preferredModelId,
-        aspectRatio,
-        style,
-        extraParams
-      }
+      state: {}
     });
 
     if (result.success) {
@@ -242,29 +210,29 @@ router.post('/generate-x402', async (req, res) => {
       });
     }
 
-    if (!req.headers['x-payment']) {
-      const paymentRequirements = await paymentService.preparePayment();
-      return res.status(402).json({
-        accepts: paymentRequirements,
-        error: "X-PAYMENT header is required",
-        x402Version: 1
-      });
-    }
+    // if (!req.headers['x-payment']) {
+    //   const paymentRequirements = await paymentService.preparePayment();
+    //   return res.status(402).json({
+    //     accepts: paymentRequirements,
+    //     error: "X-PAYMENT header is required",
+    //     x402Version: 1
+    //   });
+    // }
     
     // start when request header X-PAYMENT is present
     let paymentMetadata = null;
-    if (req.headers['x-payment']) {
-      const paymentHeader = req.headers['x-payment'];
+    // if (req.headers['x-payment']) {
+      // const paymentHeader = req.headers['x-payment'];
       // prepare payment
-      const paymentRequirements = await paymentService.preparePayment();
+      // const paymentRequirements = await paymentService.preparePayment();
       // verify payment first
-      const paymentResponse = await paymentService.verifyPayment(paymentHeader, paymentRequirements);
-      if (!paymentResponse.success) {
-        return res.status(400).json({
-          success: false,
-          error: paymentResponse.error || 'Payment failed'
-        });
-      }
+      // const paymentResponse = await paymentService.verifyPayment(paymentHeader, paymentRequirements);
+      // if (!paymentResponse.success) {
+      //   return res.status(400).json({
+      //     success: false,
+      //     error: paymentResponse.error || 'Payment failed'
+      //   });
+      // }
       // console.log('payment verified:', paymentResponse);
       // console.log('payer:', paymentResponse.verification.payer, bs58.default.decode(paymentResponse.verification.payer));
 
@@ -320,25 +288,25 @@ router.post('/generate-x402', async (req, res) => {
         });
 
         // settle payment
-        const paymentResponse = await paymentService.settleOnlyPayment(paymentHeader, paymentRequirements);
-        if (!paymentResponse.success) {
-          console.error('[Agent API] Payment settlement failed:', paymentResponse.error);
-        }
-        paymentMetadata = paymentResponse.settlement;
+        // const paymentResponse = await paymentService.settleOnlyPayment(paymentHeader, paymentRequirements);
+        // if (!paymentResponse.success) {
+        //   console.error('[Agent API] Payment settlement failed:', paymentResponse.error);
+        // }
+        // paymentMetadata = paymentResponse.settlement;
 
-        if(successWebhookUrl){
-          console.log('trigger successwebhook on url:', successWebhookUrl);
-          fetch(successWebhookUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              result: result,
-              paymentMetadata: paymentMetadata
-            })
-          });
-        }
+        // if(successWebhookUrl){
+        //   console.log('trigger successwebhook on url:', successWebhookUrl);
+        //   fetch(successWebhookUrl, {
+        //     method: 'POST',
+        //     headers: {
+        //       'Content-Type': 'application/json'
+        //     },
+        //     body: JSON.stringify({
+        //       result: result,
+        //       paymentMetadata: paymentMetadata
+        //     })
+        //   });
+        // }
       } else {
         if(failureWebhookUrl){
           console.log('trigger failurewebhook on url:', failureWebhookUrl);
@@ -370,7 +338,7 @@ router.post('/generate-x402', async (req, res) => {
         });
       }
       
-    }
+    // }
   } catch (error) {
     console.log('failurewebhook url:', failureWebhookUrl);
     if(failureWebhookUrl){
