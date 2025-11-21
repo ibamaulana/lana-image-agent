@@ -803,7 +803,7 @@ Output ONLY valid JSON, no other text.`;
     const parts = await buildMultimodalParts(userMessage, referenceImages);
 
     const response = await ai.models.generateContent({
-      model: "gemini-flash-latest",
+      model: "gemini-2.5-pro",
       contents: [{
         role: 'user',
         parts
