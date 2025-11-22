@@ -1099,11 +1099,31 @@ async function generateWithGeminiOrchestrator({
     // ===== PHASE 0: Content Safety Check =====
     console.log('[Phase 0] Starting content safety check...');
     const phaseZeroStart = Date.now();
-    
-    const safetyResult = await checkContentSafety({
+
+    const safetyAgent = new Agent({
+      llm: 'o4-mini-2025-04-16', // Your LLM model (e.g., OpenAI GPT variant)
+      inputFormat: z.object({
+        prompt: z.string(),
+        referenceImages: z.array(z.string()),
+      }),
+      outputFormat: z.object({
+        safe: z.boolean(),
+        reason: z.string(),
+        category: z.enum(['nsfw', 'child_safety', 'violence', 'illegal', 'safe']),
+        confidence: z.number().min(0).max(1),
+      }),
+      temperature: 0.1, // Optional: Controls creativity (0-1)
+    });
+
+    const safetyResult = await safetyAgent.run({
       prompt,
       referenceImages: normalizedReferences
     });
+    
+    // const safetyResult = await checkContentSafety({
+    //   prompt,
+    //   referenceImages: normalizedReferences
+    // });
     
     const phaseZeroDuration = Date.now() - phaseZeroStart;
     console.log('[Phase 0] Completed in', phaseZeroDuration, 'ms');
@@ -1134,12 +1154,65 @@ async function generateWithGeminiOrchestrator({
     // ===== PHASE 1: Prompt Refinement =====
     console.log('[Phase 1] Starting prompt refinement...');
     const phaseOneStart = Date.now();
-    
-    const refinedData = await refinePromptWithGemini({
-      userId,
+
+    const refinedAgent = new Agent({
+      llm: 'o4-mini-2025-04-16', // Your LLM model (e.g., OpenAI GPT variant)
+      inputFormat: z.object({
+        prompt: z.string(),
+        referenceImages: z.array(z.string()),
+      }),
+      outputFormat: z.object({
+        mode: z.enum(['text_to_image', 'image_to_image']),
+        title: z.string().describe("Creative 3-8 word title for the image"),
+        refined_prompt: z.string().describe("The refined prompt string (remove model name if mentioned)"),
+        aspect_ratio: z.string().describe("1:1" | "16:9" | "9:16" | "4:5"),
+        style: z.string().describe(`"photorealistic" | "anime" | "artistic" | "digital-art" | "fantasy" | "cinematic" | etc..`),
+        // referenceImages: z.array(z.string()),
+      }),
+      temperature: 0.5, // Optional: Controls creativity (0-1)
+    });
+
+    const onlyRefinedData = await refinedAgent.run({
       prompt,
       referenceImages: normalizedReferences
     });
+
+    const modelSelectorAgent = new Agent({
+      llm: 'o4-mini-2025-04-16', // Your LLM model (e.g., OpenAI GPT variant)
+      inputFormat: z.object({
+        prompt: z.string(),
+        referenceImages: z.array(z.string()),
+      }),
+      outputFormat: z.object({
+        preferred_model: z.string().describe("model name/keyword if user specified, otherwise null"),
+        modelRequirements: z.object({
+          needsReferenceImages: z.boolean().describe("true or false"),
+          minQuality: z.enum(["low", "moderate", "good", "very-good", "excellent"]),
+          styleFocus: z.string().describe([`"photorealistic", "anime", etc.`]),
+          speedPreference: z.enum(["fast", "no", "null"]),
+          useCase: z.string().describe("brief description of use case if clear"),
+          specialNeeds: z.string().describe([`"handles faces well", "good at hands", etc.`])
+        })
+      }),
+      temperature: 0.5, // Optional: Controls creativity (0-1)
+    });
+
+    const modelData = await modelSelectorAgent.run({
+      prompt,
+      referenceImages: normalizedReferences
+    });
+
+    const refinedData = {
+      referenceImages: normalizedReferences,
+      ...onlyRefinedData,
+      ...modelData
+    }
+    
+    // const refinedData = await refinePromptWithGemini({
+    //   userId,
+    //   prompt,
+    //   referenceImages: normalizedReferences
+    // });
     
     const phaseOneDuration = Date.now() - phaseOneStart;
     console.log('[Phase 1] Completed in', phaseOneDuration, 'ms');
